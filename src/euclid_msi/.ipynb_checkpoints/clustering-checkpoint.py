@@ -1142,12 +1142,30 @@ plt.yticks(rotation=0)
 plt.tight_layout()
 plt.savefig("purpleheatmap_acronymlipizones.pdf")
 plt.show()
-
 matches = normalized_df.T
 new_index = [f"{get_row_prefix(row)}" for old_idx, row in matches.iterrows()] #_{old_idx}
 mat = pd.DataFrame([matches.index, new_index], index=['oldname', 'acronym']).T
 
+# rename the acronyms with understandable words whenever possible
+from allensdk.core.reference_space_cache import ReferenceSpaceCache
+from allensdk.api.queries.ontologies_api import OntologiesApi
 
+oapi = OntologiesApi()
+structure_graph = oapi.get_structures(
+    structure_graph_ids=1,
+    num_rows='all'
+)
+
+mat['Finegrainedname'] = mat['acronym']
+i = 0
+for acronym in mat['acronym']:
+    matching_structures = [s for s in structure_graph if s['acronym'] == acronym]
+    if matching_structures:
+        mat['Finegrainedname'].iloc[i] = matching_structures[0]['name']
+    i = i + 1
+
+acromat = mat.copy()
+acromat
 
 
 ##################################################################################################################
