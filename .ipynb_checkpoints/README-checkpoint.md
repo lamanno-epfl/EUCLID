@@ -1,4 +1,4 @@
-# Euclid MSI
+# EUCLID
 
 This package provides tools for data analysis with the following modules:
 
