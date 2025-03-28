@@ -26,7 +26,7 @@ import pandas as pd
 import anndata
 import scanpy as sc
 import squidpy as sq
-import backSPIN
+from . import backSPIN
 import leidenalg
 import networkx as nx
 import igraph as ig
@@ -418,7 +418,7 @@ class Clustering:
         # - data: the reconstructed dataset (self.reconstructed_data_df)
         # - standardized_embeddings_GLOBAL: self.standardized_embeddings_GLOBAL
         # - coordinates: self.coordinates
-        # We also assume that a global variable “trainpoints”, “valpoints”, “testpoints” are defined based on coordinates.
+        # We also assume that a global variable "trainpoints", "valpoints", "testpoints" are defined based on coordinates.
         # In a real implementation, these would be passed or computed.
         data = self.reconstructed_data_df.copy()
         # Create a copy of the raw data (for differential testing)
@@ -436,7 +436,7 @@ class Clustering:
         adata.obsm['lipids'] = normalized_datemp
         
         # Get global standardized embeddings (assumed computed previously)
-        global self_standardized = self.standardized_embeddings_GLOBAL.copy()
+        # WARNINGLINE global self_standardized = self.standardized_embeddings_GLOBAL.copy()
         
         # Initialize a log DataFrame for clustering history.
         column_names = [f"level_{i}" for i in range(1, max_depth+1)]
@@ -593,10 +593,10 @@ class Clustering:
         lipizone_colors : pd.Series
             A Series mapping each observation to a hex color.
         """
-        # In our refactored version, we assume that “tree” is available (e.g. from the clustering history)
+        # In our refactored version, we assume that "tree" is available (e.g. from the clustering history)
         # We use the plotting utilities from the snippet.
         # (For brevity, much of the detailed plotting code is preserved.)
-        # Here we simulate the existence of a “contour” array, e.g. eroded annotation.
+        # Here we simulate the existence of a "contour" array, e.g. eroded annotation.
         conto = np.load("eroded_annot.npy")
         coords = coordinates.fillna(0).replace([np.inf, -np.inf], 0)
         xs = (coords['xccf']*40).astype(int)

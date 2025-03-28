@@ -436,7 +436,7 @@ class Clustering:
         adata.obsm['lipids'] = normalized_datemp
         
         # Get global standardized embeddings (assumed computed previously)
-        global self_standardized = self.standardized_embeddings_GLOBAL.copy()
+        # WARNINGLINE global self_standardized = self.standardized_embeddings_GLOBAL.copy()
         
         # Initialize a log DataFrame for clustering history.
         column_names = [f"level_{i}" for i in range(1, max_depth+1)]
