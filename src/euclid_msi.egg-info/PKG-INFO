@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: euclid_msi
+Version: 0.0.1
+Summary: A package for spatial lipidomics data analysis including preprocessing, embedding, clustering, postprocessing, case-control analysis, and plotting.
+Author-email: Luca Fusar Bassini <luca.fusarbassini@epfl.ch>
+License: BSD 3-Clause
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# EUCLID
+
+This package provides tools for data analysis with the following modules:
+
+- **Preprocessing** (exposed as `prp`)
+- **Embedding** (exposed as `em`)
+- **Clustering** (exposed as `cl`)
+- **Postprocessing** (exposed as `pop`)
+- **Case-Control Analysis** (exposed as `cc`)
+- **Plotting** (exposed as `pl`)
+
+More detailed documentation will follow.
+
+EUCLID was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA

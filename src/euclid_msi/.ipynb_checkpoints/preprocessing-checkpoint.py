@@ -25,8 +25,9 @@ class Preprocessing:
 
     def calculate_moran(
         self,
-        path_data="/data/luca/lipidatlas/uMAIA_allbrains/021124_ALLBRAINS_normalised.zarr",
-        acquisitions=None,
+        path_data,
+        acquisitions,
+        n_molecules=np.inf,
         log_file="iterations_log.txt",
         morans_csv="morans_by_sec.csv"
     ):
@@ -35,7 +36,7 @@ class Preprocessing:
 
         Parameters
         ----------
-        path_data : str, optional
+        path_data : str
             Path to the uMAIA Zarr dataset.
         acquisitions : list of str, optional
             List of acquisitions/sections to process.
@@ -49,28 +50,30 @@ class Preprocessing:
         pd.DataFrame
             DataFrame (feature x acquisition) containing Moran's I values.
         """
-        if acquisitions is None:
-            acquisitions = [
-                'BrainAtlas/BRAIN2/20211201_MouseBrain2_S11_306x248_Att30_25um',
-                'BrainAtlas/BRAIN2/20211202_MouseBrain2_S12_332x246_Att30_25um',
-            ]
-
+        
+        acqn = acquisitions['acqn'].values
+        acquisitions = acquisitions['acqpath'].values
+        
         root = zarr.open(path_data, mode='r')
-        features = np.sort(list(root.group_keys()))
+        features = np.sort(list(root.group_keys()))[:n_molecules]
         masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
-        n_acquisitions = len(acquisitions)
-
+        
+        n_acquisitions = len(acquisitions) # FIXXXX HERE I SHOULD BETTER CALL ACQUISITIONS BY NAME EG PROTOTYPING ON SUBSET
+        accqn_num = np.arange(n_acquisitions)
+        
         morans_by_sec = pd.DataFrame(
             np.zeros((len(features), n_acquisitions)), 
             index=features, 
-            columns=[str(i) for i in range(n_acquisitions)]
+            columns=acqn.astype(str)
         )
 
         with open(log_file, "a") as file:
             for i_feat, feat in tqdm(enumerate(features), desc="Calculating Moran's I"):
-                for j in range(n_acquisitions):
-                    mask = masks[j]
+                for j, j1 in zip(acqn, accqn_num):
+                    mask = masks[j1]
+                    
                     image = root[feat][str(j)][:]
+                    
                     coords = np.column_stack(np.where(mask))
                     X = image[coords[:, 0], coords[:, 1]]
 
@@ -85,13 +88,14 @@ class Preprocessing:
                 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 file.write(f"Iteration {i_feat + 1}, Time: {current_time}\n")
 
+        morans_by_sec = morans_by_sec.fillna(0)
         morans_by_sec.to_csv(morans_csv)
         return morans_by_sec
 
 
     def store_exp_data_metadata(
         self,
-        path_data="/data/luca/lipidatlas/uMAIA_allbrains/021124_ALLBRAINS_normalised.zarr",
+        path_data,
         acquisitions=None,
         metadata_csv="acquisitions_metadata.csv",
         output_anndata="msi_preprocessed.h5ad",
@@ -118,15 +122,14 @@ class Preprocessing:
         sc.AnnData
             AnnData object with pixel-wise intensities and metadata.
         """
-        if acquisitions is None:
-            acquisitions = [
-                'BrainAtlas/BRAIN2/20211201_MouseBrain2_S11_306x248_Att30_25um',
-                'BrainAtlas/BRAIN2/20211202_MouseBrain2_S12_332x246_Att30_25um',
-            ]
-
+        
         root = zarr.open(path_data, mode='r')
         features = np.sort(list(root.group_keys()))
+
+        acqn = acquisitions['acqn'].values
+        acquisitions = acquisitions['acqpath'].values
         n_acquisitions = len(acquisitions)
+        accqn_num = np.arange(n_acquisitions)
 
         # Prepare a 4D array: (features, acquisitions, x, y)
         lipid_native_sections_array = np.full(
@@ -135,10 +138,10 @@ class Preprocessing:
         )
 
         for i_feat, feat in tqdm(enumerate(features), desc="Storing data into array"):
-            for i_sec in range(n_acquisitions):
+            for i_sec, i_sec1  in zip(acqn, accqn_num):
                 img = root[feat][str(i_sec)][:]
                 img_x, img_y = img.shape
-                lipid_native_sections_array[i_feat, i_sec, :img_x, :img_y] = img
+                lipid_native_sections_array[i_feat, i_sec1, :img_x, :img_y] = img
 
         # Flatten along acquisitions * x * y
         flattened_lipid_tensor = lipid_native_sections_array.reshape(lipid_native_sections_array.shape[0], -1)
@@ -146,10 +149,10 @@ class Preprocessing:
 
         # Build column names: section{i}_pixel{row}_{col}
         column_names = []
-        for i_sec in range(n_acquisitions):
+        for i_sec, i_sec1  in zip(acqn, accqn_num):
             for row in range(max_dim[0]):
                 for col in range(max_dim[1]):
-                    column_names.append(f"section{i_sec+1}_pixel{row+1}_{col+1}")
+                    column_names.append(f"section{i_sec1+1}_pixel{row+1}_{col+1}")
 
         df = pd.DataFrame(flattened_lipid_tensor, index=lipid_names, columns=column_names)
         df_transposed = df.T.dropna(how='all')  # Remove rows that are entirely NaN
@@ -157,8 +160,8 @@ class Preprocessing:
 
         # Extract spatial coordinates
         df_index = df_transposed.index.to_series().str.split('_', expand=True)
-        df_index.columns = ['Section', 'x', 'y']
-        df_index['Section'] = df_index['Section'].str.replace('section', '')
+        df_index.columns = ['SectionID', 'x', 'y']
+        df_index['SectionID'] = df_index['SectionID'].str.replace('section', '')
         df_index['x'] = df_index['x'].str.split('pixel').str.get(1)
         df_index = df_index.astype(int)
         df_transposed = df_transposed.join(df_index)
@@ -168,27 +171,18 @@ class Preprocessing:
 
         # Merge with section-wise metadata
         metadata = pd.read_csv(metadata_csv)
-        cols = list(df_transposed.columns)
-        # The second to last column is 'SectionID' for merging
-        # (Because we added 'Section','x','y' at the end.)
-        cols[-3] = "SectionID"
-        df_transposed.columns = cols
-
         df_transposed = df_transposed.merge(metadata, on='SectionID', how='left')
 
-        # Example filter: remove pixels that are entirely < 0.0001
+        # Filter: remove pixels that are entirely < 0.0001
         mask = (df_transposed.loc[:, features] < 0.0001).all(axis=1)
         df_transposed = df_transposed[~mask]
 
-        # Build AnnData
-        # Basic approach: everything is in df_transposed. We separate the X (features) from obs (pixels).
+        # Build AnnData, basic approach: everything is in df_transposed. We separate the X (features) from obs (pixels).
         X = df_transposed[features].values
         obs_cols = [c for c in df_transposed.columns if c not in features]
         adata = sc.AnnData(X=X)
         adata.var_names = features
         adata.obs = df_transposed[obs_cols].copy()
-
-        # Optionally store additional pixel-level data in obsm, uns, etc.
 
         # Save to disk
         adata.write_h5ad(output_anndata)
@@ -197,13 +191,14 @@ class Preprocessing:
 
     def annotate_molecules(
         self,
+        msipeaks,
         structures_sdf="structures.sdf",
         hmdb_csv="HMDB_complete.csv",
-        user_annotation_csv="user_lipid_annotations.csv",
+        user_annotation_csv=None,
         ppm=5
     ):
         """
-        Annotate m/z peaks with lipid names using external references (LIPID MAPS, HMDB, user CSV).
+        Annotate m/z peaks with lipid names using external references (LIPID MAPS + HMDB, user's CSV file, ideally from a paired LC-MS dataset).
 
         Parameters
         ----------
@@ -222,6 +217,8 @@ class Preprocessing:
             Combined annotation table with possible matches.
         """
         from rdkit import Chem
+
+        peaks_df = pd.DataFrame(msipeaks, index = msipeaks, columns = ["PATH_MZ"])
 
         # Load LIPID MAPS from SDF
         supplier = Chem.SDMolSupplier(structures_sdf)
@@ -251,7 +248,7 @@ class Preprocessing:
             'INCHY_KEY': ik_list
         })
 
-        # Merge with HMDB
+        # Merge with HMDB if needed to match METASPACE annotations
         hmdb = pd.read_csv(hmdb_csv, index_col=0)
         merged_df = pd.merge(
             lipidmaps, 
@@ -262,31 +259,51 @@ class Preprocessing:
         )
         conversionhmdb = merged_df[['DBID', 'ABBREVIATION']].dropna()
 
-        # Load user annotation CSV containing m/z and Lipid names
-        # We assume columns: ["m/z", "Lipids", "Score"]
-        # Example partial approach:
-        user_df = pd.read_csv(user_annotation_csv)
+        reference_mz = 800 # scale of our dataset
+        distance_ab5ppm = ppm / 1e6 * reference_mz
+        
+        def _find_closest_abbreviation(mz_list, lipidmaps):
+            closest_abbreviations = []
+            for mz in mz_list:
+                abs_diffs = np.abs(lipidmaps['EXACT_MASS'].astype(float) - float(mz))
+                if np.min(abs_diffs) <= distance_ab5ppm:
+                    closest_idx = abs_diffs.idxmin()
+                    closest_abbreviation = lipidmaps.at[closest_idx, 'ABBREVIATION']
+                else:
+                    closest_abbreviation = None
+                closest_abbreviations.append(closest_abbreviation)
+            return closest_abbreviations
 
-        # Example matching function:
-        def find_matching_lipids(path_mz):
-            lower_bound = path_mz - ppm / 1e6 * path_mz
-            upper_bound = path_mz + ppm / 1e6 * path_mz
-            subset = user_df[
-                (user_df['m/z'] >= lower_bound) & (user_df['m/z'] <= upper_bound)
-            ]['Lipids']
-            return ', '.join(subset)
+        # add LIPIDMAPS annotation
+        lipidmaps.loc[lipidmaps['ABBREVIATION'].isna(), 'ABBREVIATION'] = lipidmaps['NAME']
+        lipidmaps = lipidmaps[['EXACT_MASS',	'ABBREVIATION']]
+        # reconsider all possible adducts
+        peaks_df['mz'] = peaks_df.index.astype(float)
+        peaks_df['mz'] = [[peaks_df.iloc[i,:]['mz'] - 22.989769, peaks_df.iloc[i,:]['mz'] - 38.963707, peaks_df.iloc[i,:]['mz'] - 1.007825, peaks_df.iloc[i,:]['mz'] - 18.033823] for i in range(0, peaks_df.shape[0])]
+        lipidmaps['EXACT_MASS'] = pd.to_numeric(lipidmaps['EXACT_MASS'], errors='coerce')
+        peaks_df['LIPIDMAPS'] = _find_closest_abbreviation(peaks_df['PATH_MZ'].values.tolist(), lipidmaps)
 
-        # Illustrative: build a table of matched lipids
-        # This is just an example. Real usage depends on your logic.
-        matched_rows = []
-        for mz_val in user_df['m/z']:
-            matched = find_matching_lipids(mz_val)
-            matched_rows.append([mz_val, matched])
+        try:
+            # Load user annotation CSV containing m/z and Lipid names
+            # We assume columns: ["m/z", "Lipids", "Score"]
+            user_df = pd.read_csv(user_annotation_csv)
+    
+            # Example matching function:
+            def _find_matching_lipids(path_mz, lipid_mz_df):
+                try:
+                    lower_bound = path_mz - ppm / 1e6 * path_mz
+                    upper_bound = path_mz + ppm / 1e6 * path_mz
+                    matching_lipids = lipid_mz_df[(lipid_mz_df['m/z'] >= lower_bound) & (lipid_mz_df['m/z'] <= upper_bound)]['Lipids']
+                    return ', '.join(matching_lipids)
+                except:
+                    return None
+    
+            peaks_df['Lipid'] = [_find_matching_lipids(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
+                
+        except:
+            print("No paired LC-MS or METASPACE annotation dataset provided. Are you sure you want to continue with database search only?")
 
-        matched_table = pd.DataFrame(matched_rows, columns=["m/z", "MatchedLipids"])
-
-        # Return combined annotation table
-        return matched_table
+        return peaks_df
 
 
     def save_msi_dataset(
