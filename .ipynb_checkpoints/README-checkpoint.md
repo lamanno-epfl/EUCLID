@@ -10,3 +10,5 @@ This package provides tools for data analysis with the following modules:
 - **Plotting** (exposed as `pl`)
 
 More detailed documentation will follow.
+
+EUCLID was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
