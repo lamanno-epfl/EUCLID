@@ -179,13 +179,12 @@ class Embedding:
         embeddings = pd.DataFrame(nmf_all, index=new_data.index)
         if adata is not None:
             adata.obsm['X_NMF'] = embeddings.values
-        return embeddings
+        return adata
 
     def harmonize_nmf_batches(
         self,
-        nmf_embeddings: pd.DataFrame,
-        batch_metadata: pd.DataFrame,
-        vars_use: list
+        covariates: list = None, 
+        adata: sc.AnnData = None 
     ):
         """
         BLOCK 3:
@@ -193,27 +192,30 @@ class Embedding:
         
         Parameters
         ----------
-        nmf_embeddings : pd.DataFrame
-            DataFrame of NMF embeddings (pixels x factors).
-        batch_metadata : pd.DataFrame
-            DataFrame of batch covariates (index must match nmf_embeddings).
-        vars_use : list
-            List of column names in batch_metadata to use for Harmony.
+        adata : sc.AnnData, optional
+            AnnData object containing an X_NMF slot, to which an X_Harmonized slot will be added
         
         Returns
         -------
-        corrected_embeddings : pd.DataFrame
-            The Harmony-corrected NMF embeddings.
+            adata with an X_Harmonized slot
         """
-        ho = hm.run_harmony(nmf_embeddings, batch_metadata, vars_use)
-        corrected = pd.DataFrame(ho.Z_corr.T, index=nmf_embeddings.index, columns=nmf_embeddings.columns)
-        return corrected
+        nmf_embeddings = pd.DataFrame(adata.obsm['X_NMF'], index=adata.obs_names)
+        batches = adata.obs[covariates].astype("category")
+        batchessub = batches.copy()
+        unique_values = sorted(batchessub['SectionID'].unique())
+        value_mapping = {old_value: new_index for new_index, old_value in enumerate(unique_values)}
+        batchessub['SectionID'] = batchessub['SectionID'].map(value_mapping)
+        batchessub['SectionID'] = batchessub['SectionID'].astype("category")
+        vars_use=list(batchessub.columns)
+        
+        ho = hm.run_harmony(nmf_embeddings, batchessub, vars_use, max_iter_harmony=20)
+        adata.obsm['X_Harmonized'] = ho.Z_corr.T
+        return adata
 
     def approximate_dataset_harmonmf(
         self,
-        corrected_embeddings: pd.DataFrame,
+        adata: sc.AnnData,
         factor_to_lipid: np.ndarray,
-        original_feature_names: list
     ):
         """
         BLOCK 4:
@@ -221,26 +223,24 @@ class Embedding:
         
         Parameters
         ----------
-        corrected_embeddings : pd.DataFrame
-            Corrected NMF embeddings (pixels x factors).
+        adata : sc.AnnData, optional
+            AnnData object to which the approximated dataset for clustering (harmony-NMF bottleneck) will be added (in obsm['X_approximated']).
         factor_to_lipid : np.ndarray
             The H matrix from NMF (factors x lipids).
-        original_feature_names : list
-            List of original feature names (lipids) corresponding to columns.
         
         Returns
         -------
-        reconstructed_df : pd.DataFrame
-            The reconstructed data approximating the original dataset.
+            an X_approximated slot
         """
-        recon = np.dot(corrected_embeddings.values, factor_to_lipid)
-        reconstructed_df = pd.DataFrame(recon, index=corrected_embeddings.index, columns=original_feature_names)
-        reconstructed_df = reconstructed_df - np.min(reconstructed_df) + 1e-7
-        return reconstructed_df
+        corrected_embeddings = adata.obsm['X_Harmonized']
+        original_feature_names = adata.var_names
+        recon = np.dot(corrected_embeddings, factor_to_lipid)
+        adata.obsm['X_approximated'] = recon - np.min(recon) + 1e-7
+        return adata
 
     def tsne(
         self,
-        embeddings: pd.DataFrame,
+        adata: sc.AnnData,
         perplexity: int = 30,
         n_iter1: int = 500,
         exaggeration1: float = 1.2,
@@ -254,8 +254,8 @@ class Embedding:
         
         Parameters
         ----------
-        embeddings : pd.DataFrame
-            The corrected NMF embeddings (pixels x factors).
+       adata : sc.AnnData, optional
+            AnnData object containing an X_Harmonized or X_NMF slot
         perplexity : int, optional
             tSNE perplexity.
         n_iter1 : int, optional
@@ -274,6 +274,11 @@ class Embedding:
         tsne_coords : pd.DataFrame
             tSNE coordinates (pixels x 2).
         """
+
+        try:
+            embeddings = adata.obsm["X_Harmonized"]
+        except:
+            embeddings = adata.obsm["X_NMF"]
         scaler = StandardScaler()
         x_train = scaler.fit_transform(embeddings)
         affinities_train = affinity.PerplexityBasedNN(
@@ -284,7 +289,6 @@ class Embedding:
             random_state=42,
             verbose=True,
         )
-        # Use two uncorrelated NMF factors as initialization (default indices or as provided)
         init_train = x_train[:, list(init_indices)]
         tsne_emb = TSNEEmbedding(
             init_train,
@@ -294,6 +298,5 @@ class Embedding:
             verbose=True,
         )
         tsne_emb_1 = tsne_emb.optimize(n_iter=n_iter1, exaggeration=exaggeration1)
-        tsne_emb_final = tsne_emb_1.optimize(n_iter=n_iter2, exaggeration=exaggeration2)
-        tsne_coords = pd.DataFrame(tsne_emb_final.view(np.ndarray), index=embeddings.index, columns=["TSNE1", "TSNE2"])
-        return tsne_coords
+        adata.obsm['X_TSNE'] = np.array(tsne_emb_1.optimize(n_iter=n_iter2, exaggeration=exaggeration2))
+        return adata

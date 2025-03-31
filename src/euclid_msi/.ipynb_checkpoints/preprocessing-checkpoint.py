@@ -27,7 +27,7 @@ class Preprocessing:
         self,
         path_data,
         acquisitions,
-        n_molecules=np.inf,
+        n_molecules=5000000,
         log_file="iterations_log.txt",
         morans_csv="morans_by_sec.csv"
     ):
@@ -172,10 +172,11 @@ class Preprocessing:
         # Merge with section-wise metadata
         metadata = pd.read_csv(metadata_csv)
         df_transposed = df_transposed.merge(metadata, on='SectionID', how='left')
-
-        # Filter: remove pixels that are entirely < 0.0001
-        mask = (df_transposed.loc[:, features] < 0.0001).all(axis=1)
-        df_transposed = df_transposed[~mask]
+        df_transposed.index = "ind" + df_transposed.index.astype(str)
+        # what broke the adata querying by name was this, which is the correct filter but somehow (no idea how) breaks the adata querying by name
+        mask = df_transposed.loc[:, features].mean(axis=1) <= 0.00011
+        df_transposed = df_transposed.loc[mask == False, :]
+        print(df_transposed.shape)
 
         # Build AnnData, basic approach: everything is in df_transposed. We separate the X (features) from obs (pixels).
         X = df_transposed[features].values
@@ -186,6 +187,7 @@ class Preprocessing:
 
         # Save to disk
         adata.write_h5ad(output_anndata)
+        
         return adata
 
 
@@ -344,11 +346,11 @@ class Preprocessing:
         return sc.read_h5ad(filename)
 
 
-    def prioritize_adduct(
+    def prioritize_adducts(
         self,
-        path_data="/data/luca/lipidatlas/uMAIA_allbrains/021124_ALLBRAINS_normalised.zarr",
-        acquisitions=None,
-        annotation_to_mz=None,
+        path_data,
+        acquisitions,
+        annotation_to_mz,
         output_csv="prioritized_adducts.csv"
     ):
         """
@@ -358,54 +360,49 @@ class Preprocessing:
         ----------
         path_data : str, optional
             Path to the Zarr dataset.
-        acquisitions : list of str, optional
+        acquisitions : list of str
             List of acquisitions.
-        annotation_to_mz : dict, optional
+        annotation_to_mz : dict
             Dictionary mapping annotation -> list of candidate m/z values.
         output_csv : str, optional
-            Path to save the dictionary of best isobar to CSV.
+            Path to save the dictionary of best adduct to CSV.
 
         Returns
         -------
         dict
             A dictionary mapping each annotation to its best m/z value.
         """
-        if acquisitions is None:
-            acquisitions = [
-                'BrainAtlas/BRAIN2/20211201_MouseBrain2_S11_306x248_Att30_25um',
-                'BrainAtlas/BRAIN2/20211202_MouseBrain2_S12_332x246_Att30_25um',
-            ]
-        if annotation_to_mz is None:
-            annotation_to_mz = {
-                # Example placeholder
-                "SomeAnnotation": ["800.123456", "801.123456"],
-            }
 
+
+        acqn = acquisitions['acqn'].values
+        acquisitions = acquisitions['acqpath'].values
+        
         root = zarr.open(path_data, mode='r')
         features = np.sort(list(root.group_keys()))
         masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
-        n_acquisitions = len(acquisitions)
-
-        # Compute total signal
+        
+        n_acquisitions = len(acquisitions) # FIXXXX HERE I SHOULD BETTER CALL ACQUISITIONS BY NAME EG PROTOTYPING ON SUBSET
+        accqn_num = np.arange(n_acquisitions)
+        
         totsig_df = pd.DataFrame(
             np.zeros((len(features), n_acquisitions)), 
             index=features, 
-            columns=[str(i) for i in range(n_acquisitions)]
+            columns=acqn.astype(str)
         )
 
         for feat in tqdm(features, desc="Computing total signal"):
             feat_dec = f"{float(feat):.6f}"
-            for i_sec in range(n_acquisitions):
-                image = root[feat_dec][str(i_sec)][:]
-                mask = masks[i_sec]
+            for j, j1 in zip(acqn, accqn_num):
+                image = np.exp(root[feat_dec][str(j)][:])
+                mask = masks[j1]
                 image[mask == 0] = 0
                 sig = np.mean(image * 1e6)
-                totsig_df.loc[feat, str(i_sec)] = sig
+                totsig_df.loc[feat, str(j)] = sig
 
         totsig_df = totsig_df.fillna(0)
         featuresum = totsig_df.sum(axis=1)
 
-        annotation_to_mz_bestisobar = {}
+        annotation_to_mz_bestadduct = {}
         for annotation, mz_values in annotation_to_mz.items():
             max_featuresum = -float('inf')
             best_mz = None
@@ -420,126 +417,243 @@ class Preprocessing:
                     print(f"m/z value {mz_value} not found in featuresum index.")
 
             if best_mz is not None:
-                annotation_to_mz_bestisobar[annotation] = best_mz
+                annotation_to_mz_bestadduct[annotation] = best_mz
             else:
                 print(f"No valid m/z values found for annotation {annotation}.")
 
         # Optionally save the results
-        pd.DataFrame.from_dict(annotation_to_mz_bestisobar, orient='index').to_csv(output_csv)
-        return annotation_to_mz_bestisobar
-
+        pd.DataFrame.from_dict(annotation_to_mz_bestadduct, orient='index').to_csv(output_csv)
+        totsig_df.to_csv("totsig_df_" + output_csv)
+        return annotation_to_mz_bestadduct, totsig_df
 
     def feature_selection(
         self,
         adata: sc.AnnData,
         moran: pd.DataFrame,
-        n_sections_to_consider=2,
-        moran_threshold=0.4,
-        cluster_k=10,
-        output_csv="feature_scores.csv"
+        modality: str = "combined",  # options: "moran", "combined", "manual"
+        mz_vals: list = None,  # if provided, these m/z values override all other criteria
+        moran_threshold: float = 0.25,
+        cluster_k: int = 10,
+        output_csv: str = "feature_scores.csv",
+        remove_untrustworthy: bool = False
     ):
         """
-        Perform feature selection based on Moran's I, variance metrics, and dropout thresholds.
-
+        Perform feature selection based on one of three modalities.
+        
         Parameters
         ----------
         adata : sc.AnnData
             The AnnData object with pixel-wise intensities.
         moran : pd.DataFrame
             DataFrame of Moran's I values (features x sections).
-        n_sections_to_consider : int, optional
-            Number of sections to consider in the reference set.
+        modality : str, optional
+            Which feature selection modality to use. Options are:
+              - "moran": select features that have a mean Moran's I above the given threshold.
+              - "combined": perform variance-based scoring and clustering and then select
+                            clusters with the best combined metrics.
+              - "manual": bypass computations and use an explicitly provided list of m/z values.
+        mz_vals : list, optional
+            A list of m/z values to keep. If provided and non-empty, this list overrides
+            any modality-based feature selection.
         moran_threshold : float, optional
             Minimal Moran's I threshold to keep a feature.
         cluster_k : int, optional
-            Number of clusters for grouping features.
+            Number of clusters for grouping features in "combined" modality.
         output_csv : str, optional
             File path to save the feature scores.
-
+        remove_untrustworthy : bool, optional
+            If True, then features whose lipid names contain '_db' will be removed.
+        
         Returns
         -------
-        pd.DataFrame
-            DataFrame of selected features and their scores.
+        sc.AnnData
+            A new AnnData object that is subset to the selected features, with an annotation of the 
+            feature selection scores stored in .uns["feature_selection_scores"].
         """
         from sklearn.preprocessing import StandardScaler
         from sklearn.cluster import KMeans
-
-        # 1) Subset Moran
-        sub_moran = moran.iloc[:, :n_sections_to_consider]
-        # Example: mean Moran across those sections
-        mean_moran = sub_moran.mean(axis=1)
-
-        # 2) Prepare data for variance-based scoring
-        df_input = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
-        df_input[df_input > 1.0] = 0.0001  # example clamp from your snippet
-
-        scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(df_input)
-        df_scaled = pd.DataFrame(scaled_data, columns=df_input.columns, index=df_input.index)
-
-        # Build a new AnnData for the scoring step
-        temp_adata = sc.AnnData(X=df_scaled)
-        if 'Section' in adata.obs.columns:
-            temp_adata.obsm['spatial'] = adata.obs[['Section']].values
+        import scanpy as sc
+    
+        # --- Step 0. Manual override: if mz_vals is provided, simply use these features.
+        if mz_vals is not None and len(mz_vals) > 0:
+            # Convert m/z values to strings (to match adata.var_names)
+            selected_features = set(str(x) for x in mz_vals)
+            # Create a simple scores table to annotate the decision.
+            scores_df = pd.DataFrame(index=sorted(selected_features))
+            scores_df["manual_override"] = True
+        # --- Modality "moran": use only the Moran I threshold
+        elif modality.lower() == "moran":
+            # Subset Moran values to the first n_sections_to_consider and compute mean
+            sub_moran = moran###.iloc[:, :n_sections_to_consider]
+            mean_moran = sub_moran.mean(axis=1)
+            # Select features that pass the threshold
+            selected_features = set(mean_moran[mean_moran > moran_threshold].index.astype(str))
+            # Build a simple scores_df for later annotation
+            scores_df = pd.DataFrame({"moran": mean_moran}).loc[[f for f in mean_moran.index.astype(str) if f in selected_features]]
+        # --- Modality "combined": compute variance metrics and cluster features
+        elif modality.lower() == "combined":
+            # Compute mean Moran for the first n_sections_to_consider sections
+            sub_moran = moran##.iloc[:, :n_sections_to_consider]
+            mean_moran = sub_moran.mean(axis=1)
+    
+            # Prepare data: create a DataFrame from adata.X (clamping values above 1.0)
+            df_input = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+            df_input[df_input > 1.0] = 0.0001  # clamp extreme values
+    
+            # Standardize data
+            scaler = StandardScaler()
+            scaled_data = scaler.fit_transform(df_input)
+            df_scaled = pd.DataFrame(scaled_data, columns=df_input.columns, index=df_input.index)
+    
+            # Build a temporary AnnData for scoring
+            temp_adata = sc.AnnData(X=df_scaled)
+            # If spatial section information exists, attach it (using 'SectionID' if available)
+            if 'Section' in adata.obs.columns:
+                if 'SectionID' in adata.obs.columns:
+                    temp_adata.obsm['spatial'] = adata.obs['SectionID'].values
+                else:
+                    temp_adata.obsm['spatial'] = adata.obs['Section'].values
+            else:
+                temp_adata.obsm['spatial'] = np.zeros((df_scaled.shape[0], 1))
+    
+            # Use helper function to score features by variance metrics
+            var_of_vars, mean_of_vars, combined_score = self._rank_features_by_combined_score(temp_adata)
+            features_sorted = df_scaled.columns
+            scores_df = pd.DataFrame({
+                "var_of_vars": var_of_vars,
+                "mean_of_vars": mean_of_vars,
+                "combined_score": combined_score
+            }, index=features_sorted)
+            # Attach the Moran metric (casting indices to str to align)
+            scores_df['moran'] = mean_moran.values
+            # Keep only features that meet the Moran threshold
+            keep_features = set(mean_moran[mean_moran > moran_threshold].index.astype(str))
+            scores_df = scores_df.loc[scores_df.index.isin(keep_features)]
+            
+            # --- Dropout filtering: for each feature, compute the number of sections where the mean is below a threshold.
+            section_col = None
+            if 'SectionID' in adata.obs.columns:
+                section_col = 'SectionID'
+            elif 'Section' in adata.obs.columns:
+                section_col = 'Section'
+            if section_col is not None:
+                peakmeans = df_input.groupby(adata.obs[section_col]).mean()
+                missinglipid = np.sum(peakmeans < 0.00015)
+                dropout_acceptable = set(missinglipid[missinglipid < 4].index.astype(float).astype(str))
+                scores_df = scores_df.loc[scores_df.index.isin(dropout_acceptable)]
+            # Remove features with nonpositive combined score
+            scores_df = scores_df.loc[scores_df['combined_score'] > 0, :]
+    
+            # --- Clustering features using KMeans on several metrics.
+            X = scores_df[['var_of_vars', 'combined_score', 'moran']].copy()
+            if section_col is not None:
+                # Recalculate missinglipid for the features in scores_df
+                missinglipid = np.sum(peakmeans < 0.00015)
+                # Align indices as strings
+                missinglipid = missinglipid.loc[[str(f) for f in scores_df.index]]
+                scores_df['missinglipid'] = missinglipid
+                X['missinglipid'] = missinglipid
+            # Standardize the clustering features
+            scaler2 = StandardScaler()
+            X_scaled = scaler2.fit_transform(X.fillna(0))
+            kmeans = KMeans(n_clusters=cluster_k, random_state=42)
+            cluster_labels = kmeans.fit_predict(X_scaled)
+            scores_df['cluster'] = cluster_labels
+    
+            # --- Plot clustering for visual inspection with a legend
+            # Preassign colors for each unique cluster
+            import matplotlib.patches as mpatches
+            unique_clusters = sorted(scores_df['cluster'].unique())
+            n_clusters = len(unique_clusters)
+            # Create a color mapping for each cluster using tab20 colormap.
+            # We normalize by (n_clusters - 1) to cover the colormap range.
+            colors = {cluster: plt.cm.tab20(cluster / (n_clusters - 1)) for cluster in unique_clusters}
+            # Plot the scatter using the preassigned colors
+            plt.figure()
+            plt.scatter(
+                scores_df['combined_score'], 
+                scores_df['moran'], 
+                c=[colors[cluster] for cluster in scores_df['cluster']], 
+                s=2
+            )
+            plt.xlabel("Combined Score")
+            plt.ylabel("Moran")
+            plt.title("Feature Selection Clustering")
+            # Create the legend using the same color mapping
+            handles = [mpatches.Patch(color=colors[cluster], label=f"Cluster {cluster}") for cluster in unique_clusters]
+            plt.legend(handles=handles, title="Clusters")
+            plt.show()
+    
+            # --- Output CSV file with the cluster assignments for each m/z feature
+            cluster_assignments = scores_df[['cluster']]
+            cluster_assignments.to_csv("cluster_assignments.csv")
+            print("Cluster assignments CSV saved as 'cluster_assignments.csv'.")
+    
+            # --- Interactive manual cluster selection:
+            user_input = input("Enter the cluster numbers you want to keep (comma-separated), "
+                               "or press Enter to auto-select top clusters: ")
+            if user_input.strip():
+                try:
+                    keep_clusters = [int(x.strip()) for x in user_input.split(",")]
+                except Exception as e:
+                    print("Error parsing input, using automatic selection.")
+                    keep_clusters = None
+            else:
+                keep_clusters = None
+    
+            # --- Cluster selection: use manual selection if provided, else automatic selection.
+            if keep_clusters is not None:
+                scores_df = scores_df[scores_df['cluster'].isin(keep_clusters)]
+            else:
+                cluster_means = np.sqrt(scores_df.groupby('cluster')['combined_score'].mean()**2 + 
+                                          2 * scores_df.groupby('cluster')['moran'].mean()**2)
+                threshold = np.percentile(cluster_means, 50)
+                best_clusters = cluster_means[cluster_means >= threshold].index
+                scores_df = scores_df[scores_df['cluster'].isin(best_clusters)]
+            selected_features = set(scores_df.index.astype(str))
         else:
-            temp_adata.obsm['spatial'] = np.zeros((df_scaled.shape[0], 1))
-
-        # Score features
-        var_of_vars, mean_of_vars, combined_score = self._rank_features_by_combined_score(temp_adata)
-        features_sorted = df_scaled.columns
-        scores_df = pd.DataFrame({
-            "feature": features_sorted,
-            "var_of_vars": var_of_vars,
-            "mean_of_vars": mean_of_vars,
-            "combined_score": combined_score
-        })
-        scores_df.set_index("feature", inplace=True)
-
-        # Attach Moran
-        # Align index types
-        # Convert both to strings if needed
-        mean_moran.index = mean_moran.index.astype(str)
-        scores_df.index = scores_df.index.astype(str)
-        scores_df['moran'] = mean_moran.reindex(scores_df.index).fillna(0)
-
-        # Filter by Moran threshold
-        keep_features = mean_moran[mean_moran > moran_threshold].index
-        keep_features = keep_features.intersection(scores_df.index)
-        scores_df = scores_df.loc[keep_features]
-
-        # Example dropout threshold logic would go here if needed
-
-        # KMeans clustering
-        X = scores_df[['var_of_vars', 'combined_score', 'moran']].fillna(0)
-        kmeans = KMeans(n_clusters=cluster_k, random_state=42)
-        cluster_labels = kmeans.fit_predict(X)
-        scores_df['cluster'] = cluster_labels
-
-        # Save
+            raise ValueError("Invalid modality. Choose from 'moran', 'combined', or use mz_vals for manual override.")
+    
+        # --- Final filtering: remove features flagged as untrustworthy (those whose names contain '_db')
+        if remove_untrustworthy:
+            selected_features = {f for f in selected_features if "_db" not in f}
+    
+        # --- Subset the AnnData object to only the selected features.
+        # Ensure that the features in the selection actually exist in adata.var_names.
+        final_features = [f for f in adata.var_names if f in selected_features]
+        feature_selected_adata = adata[:, final_features].copy()
+    
+        # Annotate the AnnData object with the feature selection scores table for later reference.
+        feature_selected_adata.uns["feature_selection_scores"] = scores_df if 'scores_df' in locals() else None
+    
+        # Save the scores table to a CSV file.
         scores_df.to_csv(output_csv)
-        return scores_df
-
-
+        
+        return feature_selected_adata
+    
+    
     def _rank_features_by_combined_score(self, adata: sc.AnnData):
         """
         Helper method to rank features by a combined score of variance metrics.
-
+    
         Parameters
         ----------
         adata : sc.AnnData
             An AnnData object with X as scaled features and obsm['spatial'] containing 'Section'.
-
+    
         Returns
         -------
         tuple of np.ndarrays
             (var_of_vars, mean_of_vars, combined_score)
         """
-        sections = adata.obsm['spatial'][:, 0]  # Assuming column 0 is 'Section'
+        import numpy as np
+    
+        sections = adata.obsm['spatial']
         unique_sections = np.unique(sections)
-
+    
         var_of_vars = []
         mean_of_vars = []
-
+    
         # Evaluate each feature
         for i in range(adata.X.shape[1]):
             feature_values = adata.X[:, i]
@@ -549,12 +663,13 @@ class Preprocessing:
                 section_variances.append(np.var(sec_vals))
             var_of_vars.append(np.var(section_variances))
             mean_of_vars.append(np.mean(section_variances))
-
+    
         var_of_vars = np.array(var_of_vars)
         mean_of_vars = np.array(mean_of_vars)
         combined_score = -var_of_vars / 2 + mean_of_vars
-
+    
         return var_of_vars, mean_of_vars, combined_score
+
 
 
     def min0max1_normalize_clip(
@@ -594,14 +709,14 @@ class Preprocessing:
         return df_norm
 
 
-    def lipid_properties(self, lipid_names, color_map_file="lipidclasscolors.h5ad"):
+    def lipid_properties(self, adata, color_map_file="lipidclasscolors.h5ad"):
         """
         Extract basic lipid properties from a list of lipid names.
 
         Parameters
         ----------
-        lipid_names : list of str
-            List of lipid names from the AnnData object.
+        adata : sc.AnnData
+            The AnnData object with pixel-wise intensities.
         color_map_file : str, optional
             Path to an HDF5 file containing a DataFrame with 'classcolors'.
 
@@ -611,6 +726,9 @@ class Preprocessing:
             A DataFrame containing columns: [lipid_name, class, carbons, insaturations,
             insaturations_per_Catom, broken, color].
         """
+
+        lipid_names = adata.var_names.values
+        
         df = pd.DataFrame(lipid_names, columns=["lipid_name"]).fillna('')
         # Regex extraction
         df["class"] = df["lipid_name"].apply(
