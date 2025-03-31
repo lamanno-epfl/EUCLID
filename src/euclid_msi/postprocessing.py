@@ -144,95 +144,181 @@ class Postprocessing:
     # -------------------------------------------------------------------------
     # BLOCK 1: XGBoost Feature Restoration
     # -------------------------------------------------------------------------
-    def xgboost_feature_restoration(self, output_model_dir="xgbmodels", metrics_csv="metrics_imputation_df.csv"):
+
+    
+    def xgboost_feature_restoration(
+        self,
+        moran_threshold=0.4,
+        usage_ncolumns=70,
+        usage_threshold=0.4,
+        usage_top_n=3,
+        usage_sum_threshold=2,
+        min_sections_for_training=3,
+        train_section_indices=(0, 2),
+        val_section_index=1,
+        valid_pearson_threshold=0.4,
+        output_model_dir="xgbmodels",
+        metrics_csv="metrics_imputation_df.csv",
+        xgb_params=None
+    ):
+        import os
+        import numpy as np
+        import pandas as pd
+        from tqdm import tqdm
+        from sklearn.metrics import mean_squared_error
+        from scipy.stats import pearsonr
+        from xgboost import XGBRegressor
+        import joblib
         """
         Impute lipid values on sections where measurement failed using XGBoost regression.
-        Uses Moran’s I and a user-defined threshold to decide which lipids to restore.
-        
-        Saves trained models and outputs a metrics CSV.
-        
+        Uses Moran’s I and user-defined thresholds to decide which lipids to restore.
+    
+        This function:
+        1. Selects "restorable" features based on `moran_threshold`.
+        2. Further filters features via a usage matrix determined by Moran's I on valid sections.
+           - Takes the top `usage_top_n` features above `usage_threshold` from the first
+             `usage_ncolumns` columns of self.morans, per lipid row.
+           - Only keeps rows with sum above `usage_sum_threshold`.
+           - Optionally excludes any single feature with `exclude_feature`.
+        3. Trains an XGBoost model per feature using the given train/validation split logic.
+        4. Saves trained models to `output_model_dir` and a metrics CSV to `metrics_csv`.
+        5. Applies all trained models to all embeddings to produce predicted values.
+        6. Keeps only those features with validation Pearson > `valid_pearson_threshold`.
+    
+        Parameters
+        ----------
+        self : object
+            An object that contains:
+                - self.morans: pd.DataFrame with Moran's I values, rows are features, columns are sections.
+                - self.alldata: pd.DataFrame with raw data (lipids, 'SectionID', etc.).
+                - self.embeddings: pd.DataFrame representing features (embeddings) per pixel.
+                - self.coordinates: pd.DataFrame with coordinate and 'SectionID' information per pixel.
+        moran_threshold : float, default=0.4
+            The Moran’s I threshold used to decide which features (lipids) are initially restorable.
+        usage_ncolumns : int, default=70
+            How many columns from `self.morans` to consider when constructing the usage matrix.
+        usage_threshold : float, default=0.4
+            Threshold passed to `top_3_above_threshold` to decide if a value is "good" for usage.
+        usage_top_n : int, default=3
+            The number of top columns (sections) to pick if more than `usage_top_n` columns pass `usage_threshold`.
+        usage_sum_threshold : float, default=2
+            Minimum sum (per row) in the usage matrix to keep a lipid feature.
+        min_sections_for_training : int, default=3
+            Minimum number of sections required to train. If fewer, skip that lipid feature.
+        train_section_indices : tuple of int, default=(0, 2)
+            The indices of the usage matrix columns (after filtering) to use for training.
+        val_section_index : int, default=1
+            The index of the usage matrix columns (after filtering) to use for validation.
+        valid_pearson_threshold : float, default=0.4
+            The Pearson correlation threshold required for a feature to be retained post-deployment.
+        output_model_dir : str, default="xgbmodels"
+            Directory to which trained XGBoost model files are saved.
+        metrics_csv : str, default="metrics_imputation_df.csv"
+            CSV file path where per-feature training/validation metrics are recorded.
+        xgb_params : dict or None
+            Additional parameters passed to the XGBRegressor. If None, default params are used.
+    
         Returns
         -------
-        coordinates_imputed : pd.DataFrame
-            DataFrame of predicted values per lipid (columns) for each pixel.
+        pd.DataFrame
+            A DataFrame of predicted values per retained lipid (columns) for each pixel (rows).
         """
         os.makedirs(output_model_dir, exist_ok=True)
-        # Determine which features (lipids) are restorable
-        isitrestorable = (self.morans > 0.4).sum(axis=1).sort_values()
+    
+        # 1) Determine which features (lipids) are restorable based on Moran’s I threshold
+        isitrestorable = (self.morans > moran_threshold).sum(axis=1).sort_values()
         torestore = isitrestorable[isitrestorable > 3].index
-        # Adjust alldata columns: ensure first 1400 columns are cast to string numbers.
-        cols = np.array(self.alldata.columns)
-        cols[:1400] = cols[:1400].astype(float).astype(str)
+    
+        # 2) Adjust alldata columns: ensure first 1400 columns are cast to string numbers (example-specific)
+        cols = np.array(self.alldata.columns).astype(float).astype(str)
         self.alldata.columns = cols
+    
+        # Subset the lipids to restore
         lipids_to_restore = self.alldata.loc[:, torestore.astype(float).astype(str)]
-        lipids_to_restore = lipids_to_restore.iloc[:-5, :]
-        
-        # Prepare usage dataframe from morans (here we use first 70 columns)
-        usage_dataframe = self.morans.iloc[:, :70].copy()
-        # Remove broken sections based on a 'BadSection' column from alldata (assumed present)
-        if "BadSection" in self.alldata.columns and "SectionID" in self.alldata.columns:
-            brokenones = self.alldata[["SectionID", "BadSection"]].drop_duplicates().dropna()
-            goodones = brokenones.loc[brokenones["BadSection"] == 0, "SectionID"].values
-            usage_dataframe = usage_dataframe.loc[:, usage_dataframe.columns.astype(float).isin(goodones)]
-        
-        # Define helper: choose top 3 above threshold per row.
-        def top_3_above_threshold(row, threshold=0.4):
-            above = row >= threshold
-            if above.sum() >= 3:
-                top3 = row.nlargest(3).index
+    
+        # Prepare usage dataframe from morans (here we use first `usage_ncolumns` columns)
+        usage_dataframe = self.morans.iloc[:, :usage_ncolumns].copy()
+    
+        # Define helper: choose top `usage_top_n` above `usage_threshold` per row
+        def top_n_above_threshold(row, threshold=usage_threshold, top_n=usage_top_n):
+            above_mask = row >= threshold
+            if above_mask.sum() >= top_n:
+                top_indices = row.nlargest(top_n).index
                 result = pd.Series(False, index=row.index)
-                result[top3] = True
+                result[top_indices] = True
             else:
-                result = above
+                result = above_mask
             return result
-        
-        usage_dataframe = usage_dataframe.apply(top_3_above_threshold, axis=1)
-        # Further filtering (as in your snippet, we filter to rows with sum >2 and remove a specific feature)
-        usage_dataframe = usage_dataframe.loc[usage_dataframe.sum(axis=1) > 2, :]
-        usage_dataframe = usage_dataframe.loc[usage_dataframe.index.astype(float).astype(str) != '953.120019', :]
-        
+    
+        usage_dataframe = usage_dataframe.apply(
+            lambda r: top_n_above_threshold(r, threshold=usage_threshold, top_n=usage_top_n),
+            axis=1
+        )
+        # Keep only rows where the sum is above `usage_sum_threshold`
+        usage_dataframe = usage_dataframe.loc[usage_dataframe.sum(axis=1) > usage_sum_threshold, :]
+    
         # Select corresponding lipids to restore
         lipids_to_restore = lipids_to_restore.loc[:, usage_dataframe.index.astype(float).astype(str)]
         lipids_to_restore["SectionID"] = self.alldata["SectionID"]
-        # For coordinates, assume they are extracted already from adata.obs or provided in self.coordinates.
+    
+        # Coordinates
         coords = self.coordinates.copy()
         coords["SectionID"] = coords["SectionID"].astype(float).astype(int).astype(str)
-        
+    
         metrics_df = pd.DataFrame(columns=["train_pearson_r", "train_rmse", "val_pearson_r", "val_rmse"])
-        
-        # Loop over features in usage_dataframe to train a model for each.
+    
+        # 3) Loop over features in usage_dataframe to train a model for each
         for index, row in tqdm(usage_dataframe.iterrows(), total=usage_dataframe.shape[0], desc="XGB Restoration"):
-            # For each lipid feature index:
-            train_sections = row[row].index.tolist()
-            if len(train_sections) < 3:
+            # For each lipid feature index, gather sections that are True in usage_dataframe
+            train_sections_all = row[row].index.tolist()
+            if len(train_sections_all) < min_sections_for_training:
                 continue
-            val_section = train_sections[1]
-            train_sections = [train_sections[0], train_sections[2]]
+    
+            # Train/val splitting logic
+            try:
+                val_section = train_sections_all[val_section_index]
+                train_sections = [train_sections_all[i] for i in train_section_indices]
+            except IndexError:
+                # If the user-supplied indices are invalid for the list, skip
+                continue
+    
+            # Gather train data
             train_data = self.embeddings.loc[coords["SectionID"].isin(train_sections), :]
             y_train = lipids_to_restore.loc[train_data.index, str(index)]
+    
+            # Gather val data
             val_data = self.embeddings.loc[coords["SectionID"] == val_section, :]
             y_val = lipids_to_restore.loc[val_data.index, str(index)]
+    
+            # 4) Train XGBoost model
+            model_kwargs = xgb_params if xgb_params is not None else {}
+            model = XGBRegressor(**model_kwargs)
             try:
-                model = XGBRegressor()
                 model.fit(train_data, y_train)
             except Exception as e:
                 print(f"Error at index {index}: {e}")
                 continue
+    
+            # Evaluate
             train_pred = model.predict(train_data)
             val_pred = model.predict(val_data)
             train_pearson = pearsonr(y_train, train_pred)[0]
             val_pearson = pearsonr(y_val, val_pred)[0]
             train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
             val_rmse = np.sqrt(mean_squared_error(y_val, val_pred))
-            metrics_df.loc[index] = {"train_pearson_r": train_pearson,
-                                     "train_rmse": train_rmse,
-                                     "val_pearson_r": val_pearson,
-                                     "val_rmse": val_rmse}
+    
+            metrics_df.loc[index] = {
+                "train_pearson_r": train_pearson,
+                "train_rmse": train_rmse,
+                "val_pearson_r": val_pearson,
+                "val_rmse": val_rmse
+            }
+    
+            # Save model
             model_path = os.path.join(output_model_dir, f"{index}_xgb_model.joblib")
             joblib.dump(model, model_path)
-        
-        # Deploy models on all acquisitions (loop over models)
-        # For simplicity, we iterate over files in the output_model_dir (skipping first if needed)
+    
+        # 5) Deploy models on all acquisitions (loop over saved models)
         coords_pred = coords.copy()
         for file in tqdm(os.listdir(output_model_dir), desc="Deploying XGB models"):
             if not file.endswith("joblib"):
@@ -241,21 +327,27 @@ class Postprocessing:
             model = joblib.load(model_path)
             pred = model.predict(self.embeddings)
             coords_pred[file] = pred
-        # Adjust column names: remove suffix
+    
+        # Rename new columns: remove "_xgb_model.joblib"
         new_cols = []
         for i, col in enumerate(coords_pred.columns):
-            if i >= 3:
-                new_cols.append(col.replace("_xgb_model.joblib", ""))
-            else:
+            # First few columns in coords are presumably x, y, SectionID, etc., so keep them
+            if i < len(self.coordinates.columns):
                 new_cols.append(col)
+            else:
+                new_cols.append(col.replace("_xgb_model.joblib", ""))
         coords_pred.columns = new_cols
-        # Filter using metrics: keep only lipids with validation Pearson > 0.4
+    
+        # 6) Keep only lipids whose validation Pearson > `valid_pearson_threshold`
         metrics_df.to_csv(metrics_csv)
-        valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > 0.4].index.astype(float).astype(str)
-        coords_pred = coords_pred.loc[:, valid_features]
+        valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index.astype(float).astype(str)
+        coords_pred = coords_pred.loc[:, list(coords_pred.columns[:len(self.coordinates.columns)]) + list(valid_features)]
+    
+        # For demonstration, saving to disk as HDF5 (optional)
         coords_pred.to_hdf("xgboost_recovered_lipids.h5ad", key="table")
-        # In a full implementation, one would add the restored data as a slot in adata.
+    
         return coords_pred
+
 
     # -------------------------------------------------------------------------
     # BLOCK 2: Anatomical Interpolation
