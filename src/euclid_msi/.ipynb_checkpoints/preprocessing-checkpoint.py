@@ -190,6 +190,86 @@ class Preprocessing:
         
         return adata
 
+    def add_barcodes_to_adata(self) -> None:
+        """
+        Generate a unique barcode for each observation in the AnnData object 
+        and update the observation index with these barcodes.
+        
+        The barcode is constructed from the 'SectionID', 'x', and 'y' columns in adata.obs,
+        in the format: "section{SectionID}_pixel{x}_{y}".
+        
+        Returns
+        -------
+        None
+            Updates self.adata.obs.index in-place.
+        
+        Raises
+        ------
+        ValueError
+            If any of the required columns ('SectionID', 'x', 'y') are missing.
+        """
+        required_cols = ['SectionID', 'x', 'y']
+        if not all(col in self.adata.obs.columns for col in required_cols):
+            raise ValueError(f"adata.obs must contain columns: {required_cols}")
+        
+        # Generate barcode for each observation
+        self.adata.obs.index = self.adata.obs.apply(
+            lambda row: f"section{int(row['SectionID'])}_pixel{int(row['x'])}_{int(row['y'])}", axis=1
+        )
+
+    def add_metadata_from_parquet(self, parquet_file: str) -> None:
+        """
+        Update the AnnData object by (1) filtering its observations to those present in a parquet metadata file,
+        and (2) adding any metadata columns from that file which are not already present in adata.obs.
+        
+        Parameters
+        ----------
+        parquet_file : str
+            Path to the parquet file containing metadata (with the same index as your barcode/obs index).
+        
+        Returns
+        -------
+        None
+        """
+        # Load metadata from parquet
+        metadata_df = pd.read_parquet(parquet_file)
+        # Filter adata to keep only observations whose index exists in the metadata
+        common_index = self.adata.obs.index.intersection(metadata_df.index)
+        self.adata = self.adata[common_index].copy()
+        # For each column in the metadata that is not already in adata.obs, add it.
+        for col in metadata_df.columns:
+            if col not in self.adata.obs.columns:
+                # Align by index.
+                self.adata.obs[col] = metadata_df.loc[self.adata.obs.index, col]
+
+    def filter_by_metadata(self, column: str, operation: str) -> sc.AnnData:
+        """
+        Filter the AnnData object based on a condition specified on a metadata column.
+        
+        The user provides a column name and an operation (as a string) that is applied to that column.
+        For example, if the column is "allencolor" and the operation is "!='#000000'", only entries with a 
+        different value will be kept. Similarly, for column "x" with operation ">5".
+        
+        Parameters
+        ----------
+        column : str
+            The name of the metadata column in adata.obs to filter on.
+        operation : str
+            A string representing a boolean condition (e.g., "!='#000000'", ">5").
+        
+        Returns
+        -------
+        sc.AnnData
+            A new AnnData object containing only the observations that satisfy the condition.
+        
+        Example
+        -------
+        >>> filtered_adata = preprocessing.filter_by_metadata("allencolor", "!='#000000'")
+        """
+        query_str = f"`{column}` {operation}"
+        filtered_obs = self.adata.obs.query(query_str)
+        filtered_index = filtered_obs.index
+        return self.adata[filtered_index].copy()
 
     def annotate_molecules(
         self,

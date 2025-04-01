@@ -400,6 +400,7 @@ class Clustering:
                                 default_peak_ratio=10, 
                                 peak_count_threshold=3, 
                                 peak_ratio_threshold=1.4, 
+                                combinations=200,
                                 xgb_n_estimators=1000,
                                 xgb_max_depth=8, 
                                 xgb_learning_rate=0.02,  
@@ -615,7 +616,7 @@ class Clustering:
             print("Top PCs data shape:", top_pcs_data.shape)
             print("Indices of good principal components:", goodpcs_indices)
             
-            multiplets = self._generate_combinations(len(goodpcs))
+            multiplets = self._generate_combinations(len(goodpcs), limit=combinations)
             print("Generated multiplets count:", len(multiplets))
             flag = False
             aaa = 0
@@ -791,11 +792,10 @@ class Clustering:
         
         return root_node, clusteringLOG
 
-
     # -------------------------------------------------------------------------
     # BLOCK 3: Assign colors to clusters based on spatial embedding (for visualization)
     # -------------------------------------------------------------------------
-    def assign_cluster_colors(self, tree, coordinates, pdf_output="colorzones.h5ad"):
+    def assign_cluster_colors(self, tree, coordinates):
         """
         Compute a color assignment for lipizones (clusters) based on spatial distribution.
         
@@ -805,102 +805,125 @@ class Clustering:
             A DataFrame that contains the clustering hierarchy (e.g. split history).
         coordinates : pd.DataFrame
             Spatial coordinates with columns including 'zccf','yccf','Section'.
-        pdf_output : str, optional
-            File path to save the color zones.
         
         Returns
         -------
         lipizone_colors : pd.Series
             A Series mapping each observation to a hex color.
         """
-        # In our refactored version, we assume that "tree" is available (e.g. from the clustering history)
-        # We use the plotting utilities from the snippet.
-        # (For brevity, much of the detailed plotting code is preserved.)
-        # Here we simulate the existence of a "contour" array, e.g. eroded annotation.
-        conto = np.load("eroded_annot.npy")
-        coords = coordinates.fillna(0).replace([np.inf, -np.inf], 0)
+        coords = coordinates.fillna(0).replace([np.inf, -np.inf], 0) ##########################
         xs = (coords['xccf']*40).astype(int)
         ys = (coords['yccf']*40).astype(int)
         zs = (coords['zccf']*40).astype(int)
         xs.loc[xs>527] = 527
         ys.loc[ys>319] = 319
         zs.loc[zs>455] = 455
-        coords['border'] = conto[xs, ys, zs]
+        
+        # Add standardization step
+        data_std = (self.adata.X - np.mean(self.adata.X, axis=1)[:, None]) / (np.std(self.adata.X, axis=1)[:, None] + 1e-8)
+        data_std = pd.DataFrame(data_std, index=self.adata.obs_names, columns=self.adata.var_names)
+        
         # Normalize the data per pixel
-        # Here we assume that self.adata.X exists and is comparable
-        # Combine tree with coordinates
-        levels = pd.concat([self.adata.obs, coordinates.loc[self.adata.obs_names]], axis=1)
+        levels = pd.concat([data_std, coordinates.loc[self.adata.obs_names]], axis=1)
         levels = pd.concat([levels, tree], axis=1)
         dd2 = levels.copy()
+        
         # For each unique division in a column "class" (built from earlier splits)
         divisions = dd2['class'].unique()
         colormaps = ["RdYlBu", "terrain", "PiYG", "cividis", "plasma", "PuRd", "inferno", "PuOr"]
         dd2['R'] = np.nan
         dd2['G'] = np.nan
         dd2['B'] = np.nan
-        for division, cmap_name in zip(divisions, colormaps):
+        
+        from tqdm import tqdm
+        
+        for division, cmap_name in tqdm(zip(divisions, colormaps)):
             if len(dd2.loc[dd2['class'] == division, 'cluster'].unique()) > 1:
+                print(division)  # Add debug print
+                
                 datasub = dd2[dd2['class'] == division]
                 clusters = datasub['cluster'].unique()
                 lipid_df = pd.DataFrame(columns=self.adata.var_names)
+                
                 for i in range(len(clusters)):
                     sub = datasub[datasub['cluster'] == clusters[i]]
                     lipid_data = sub[self.adata.var_names].mean(axis=0)
                     lipid_df = pd.concat([lipid_df, pd.DataFrame([lipid_data], columns=self.adata.var_names)], ignore_index=True)
+                
                 column_means = lipid_df.mean()
                 normalized_lipid_df = lipid_df.div(column_means, axis='columns')
                 normalized_lipid_df.index = clusters
                 normalized_lipid_df = normalized_lipid_df.T
+                
                 # Compute centroids and distance matrix
                 pca_columns = datasub[self.adata.var_names]
                 grouped = datasub[['cluster']].join(pca_columns)
                 centroids = grouped.groupby('cluster').mean()
                 distance_matrix = squareform(pdist(centroids, metric='euclidean'))
                 distance_df = pd.DataFrame(distance_matrix, index=centroids.index, columns=centroids.index)
+                
                 np.fill_diagonal(distance_df.values, np.inf)
                 init_idx = np.unravel_index(np.argmin(distance_df.values), distance_df.shape)
                 ordered_elements = [distance_df.index[init_idx[0]], distance_df.columns[init_idx[1]]]
                 distances = [0, distance_df.iloc[init_idx]]
+                
                 while len(ordered_elements) < len(distance_df):
                     last = ordered_elements[-1]
                     remaining = distance_df.loc[last, ~distance_df.columns.isin(ordered_elements)]
                     next_elem = remaining.idxmin()
                     ordered_elements.append(next_elem)
                     distances.append(remaining[next_elem])
+                
                 cumulative = np.cumsum(distances)
                 normalized_dist = cumulative / cumulative[-1]
                 cmap = plt.get_cmap(cmap_name)
                 colors_rgb = [cmap(val) for val in normalized_dist]
                 hsv = [mcolors.rgb_to_hsv(rgb[:3]) for rgb in colors_rgb]
                 modified_hsv = []
+                
                 for i, (h, s, v) in enumerate(hsv):
                     if (i+1) % 2 != 0:
                         s = min(1, s + 0.7 * s)
                     modified_hsv.append((h, s, v))
+                
                 modified_rgb = [mcolors.hsv_to_rgb(hsv_val) for hsv_val in modified_hsv]
                 lipocolor = pd.DataFrame(modified_rgb, index=ordered_elements, columns=['R','G','B'])
                 lipocolor_reset = lipocolor.reset_index().rename(columns={'index': 'cluster'})
-                dd2.update(pd.merge(dd2, lipocolor_reset, on='cluster', how='left')[['R','G','B']])
+                
+                print(lipocolor_reset)  # Add debug print
+                
+                # Update using the index-based approach (similar to the original function)
+                indices = datasub.index
+                datasub_rgb = datasub.copy()
+                
+                # Create a DataFrame with just the RGB columns and the right index
+                rgb_df = pd.merge(datasub_rgb[['cluster']], lipocolor_reset, on='cluster', how='left')
+                rgb_df.index = datasub_rgb.index
+                
+                # Update only the RGB columns
+                dd2.loc[indices, 'R'] = rgb_df['R']
+                dd2.loc[indices, 'G'] = rgb_df['G']
+                dd2.loc[indices, 'B'] = rgb_df['B']
             else:
                 sub = dd2[dd2['class'] == division]
                 sub['R'] = 0; sub['G'] = 0; sub['B'] = 0
                 dd2.update(sub[['R','G','B']])
+        
         def rgb_to_hex(r, g, b):
             try:
                 r, g, b = [int(255*x) for x in [r, g, b]]
                 return f'#{r:02x}{g:02x}{b:02x}'
             except:
                 return np.nan
+        
         dd2['lipizone_color'] = dd2.apply(lambda row: rgb_to_hex(row['R'], row['G'], row['B']), axis=1)
         dd2['lipizone_color'].fillna('gray', inplace=True)
-        # Save color assignment
-        dd2['lipizone_color'].to_hdf(pdf_output, key="table")
         return dd2['lipizone_color']
-
+    
     # -------------------------------------------------------------------------
     # BLOCK 4: Apply the learnt Euclid clustering tree to the whole dataset.
     # -------------------------------------------------------------------------
-    def apply_euclid_clustering(self, tree_file="rootnode_clustering_whole_clean.pkl", ds_factor=1):
+    def apply_euclid_clustering(self, tree_file="rootnode_clustering.pkl", ds_factor=1):
         """
         Apply the learnt Euclid clustering tree to new (or full) dataset.
         
@@ -909,45 +932,135 @@ class Clustering:
         df_paths : pd.DataFrame
             DataFrame with hierarchical cluster labels.
         """
+        print("\n=== Starting apply_euclid_clustering ===")
+        # Load the pre-trained clustering tree.
+        print("Loading tree file:", tree_file)
         with open(tree_file, "rb") as f:
             root_node = pickle.load(f)
-        # Define a recursive tree traversal.
-        def _traverse_tree(node, current_adata, embds, paths, level=0):
-            print("Traverse level:", level)
+        print("Loaded root node from file.")
+    
+        # Set penalty parameters (should match those used during learning).
+        penalty1 = 1.5
+        penalty2 = 2
+        print("Penalty parameters set: penalty1 =", penalty1, ", penalty2 =", penalty2)
+    
+        # Determine the proper index for the new data.
+        if hasattr(self.reconstructed_data_df, 'index'):
+            idx = self.reconstructed_data_df.index
+            print("Using index from self.reconstructed_data_df. First 5 indices:", list(idx[:5]))
+        else:
+            idx = self.adata.obs_names
+            print("Using index from self.adata.obs_names. First 5 indices:", list(idx[:5]))
+    
+        # Prepare a new AnnData object using the reconstructed data.
+        print("Preparing new AnnData object from reconstructed_data_df with shape:", self.reconstructed_data_df.shape)
+        new_adata = sc.AnnData(X=self.reconstructed_data_df.copy())
+        new_adata.obs_names = idx  # ensure proper observation names
+        print("New AnnData object prepared. First 5 obs_names:", list(new_adata.obs_names[:5]))
+        new_adata.obsm['spatial'] = self.metadata[['y', 'x', 'Section']].loc[idx, :].values
+        print("Assigned obsm['spatial'] with shape:", new_adata.obsm['spatial'].shape)
+    
+        # Define the recursive tree traversal function.
+        def traverse_tree(node, current_adata, paths, level=0):
+            print("\n" + "=" * 50)
+            print("Traversing level:", level)
+            print("Current data shape:", current_adata.shape)
+            print("Current observation names (first 5):", list(current_adata.obs_names[:5]))
+            
             if node is None or not node.children:
+                print("No node or no children found at level", level, ". Returning.")
                 return
+    
             if current_adata.shape[0] == 0:
+                print(f"Empty data at level {level}. Returning.")
                 return
+    
+            # Apply the node's NMF transformation.
+            print("Applying NMF transformation at level", level)
             nmf = node.nmf
             X_nmf = nmf.transform(current_adata.X)
-            factors = node.factors_to_use
-            X_nmf = X_nmf[:, factors]
-            scaler_local = node.scaler
-            X_scaled = scaler_local.transform(X_nmf)
-            globembds = self.standardized_embeddings_GLOBAL.loc[current_adata.obs_names].values / penalty2
-            embspace = np.concatenate((X_scaled, embds/penalty1, globembds), axis=1)
-            child_labels = node.xgb_model.predict(embspace)
-            for i, idx in enumerate(current_adata.obs_names):
-                if idx not in paths:
-                    paths[idx] = []
-                paths[idx].append(child_labels[i])
-            idx0 = current_adata.obs_names[child_labels == 0]
-            idx1 = current_adata.obs_names[child_labels == 1]
-            adata0 = current_adata[current_adata.obs_names.isin(idx0)]
-            adata1 = current_adata[current_adata.obs_names.isin(idx1)]
-            embd0 = X_scaled[child_labels == 0]
-            embd1 = X_scaled[child_labels == 1]
-            _traverse_tree(node.children.get(0), adata0, embd0, paths, level+1)
-            _traverse_tree(node.children.get(1), adata1, embd1, paths, level+1)
+            print("Shape of X_nmf:", X_nmf.shape)
+    
+            # Select only the factors used at this node.
+            factors_to_use = node.factors_to_use
+            print("Factors to use at level", level, ":", factors_to_use)
+            X_nmf = X_nmf[:, factors_to_use]
+            print("Shape of X_nmf after selecting factors:", X_nmf.shape)
+    
+            # Scale (whiten) the NMF-transformed data.
+            scaler = node.scaler
+            X_scaled = scaler.transform(X_nmf)
+            print("Shape of X_scaled:", X_scaled.shape)
+    
+            # Always compute the global embeddings for the current observations.
+            global_emb = self.standardized_embeddings_GLOBAL.loc[current_adata.obs_names].values
+            print("Shape of global_emb:", global_emb.shape)
+    
+            embspace = np.concatenate((X_scaled, global_emb / penalty1, global_emb / penalty2), axis=1)
+            print("Shape of concatenated embspace:", embspace.shape)
+    
+            # Predict the child cluster labels using the stored XGBoost model.
+            xgb_model = node.xgb_model
+            print("Predicting child labels at level", level, "using XGBoost model.")
+            child_labels = xgb_model.predict(embspace)
+            print("Child labels predicted:", child_labels)
+            print("Unique child labels at level", level, ":", np.unique(child_labels))
+    
+            # Record the labels in the paths dictionary.
+            for i, obs in enumerate(current_adata.obs_names):
+                if obs not in paths:
+                    paths[obs] = []
+                paths[obs].append(child_labels[i])
+            print("Updated paths for level", level, "for first 5 obs:",
+                  {obs: paths[obs] for obs in list(current_adata.obs_names[:5])})
+    
+            child_labels = np.array(child_labels)
+            cl0members = current_adata.obs_names[child_labels == 0]
+            cl1members = current_adata.obs_names[child_labels == 1]
+            print("Number of observations in child 0:", len(cl0members))
+            print("Number of observations in child 1:", len(cl1members))
+    
+            current_adata0 = current_adata[current_adata.obs_names.isin(cl0members)]
+            current_adata1 = current_adata[current_adata.obs_names.isin(cl1members)]
+            print("Shape of current_adata0:", current_adata0.shape)
+            print("Shape of current_adata1:", current_adata1.shape)
+    
+            if current_adata0.shape[0] == 0 or current_adata1.shape[0] == 0:
+                print(f"Warning: One child node has no data at level {level}. Skipping recursion.")
+                return
+    
+            # Recursively traverse the children.
+            print("Recursing to child 0 at level", level + 1)
+            traverse_tree(node.children.get(0), current_adata0, paths, level + 1)
+            print("Recursing to child 1 at level", level + 1)
+            traverse_tree(node.children.get(1), current_adata1, paths, level + 1)
+    
+        # Optionally downsample the new data.
+        print("Downsampling new_adata with ds_factor:", ds_factor)
+        new_adata_ds = new_adata[::ds_factor]
+        print("Downsampled new_adata shape:", new_adata_ds.shape)
+    
+        # Initialize the paths dictionary and traverse the tree.
         paths = {}
-        embds = self.standardized_embeddings_GLOBAL[::ds_factor].values
-        new_adata = sc.AnnData(X=self.reconstructed_data_df)
-        new_adata.obsm['spatial'] = self.metadata[['zccf','yccf','Section']].loc[self.reconstructed_data_df.index].values
-        _traverse_tree(root_node, new_adata[::ds_factor], embds, paths)
+        print("Starting tree traversal from root node.")
+        traverse_tree(root_node, new_adata_ds, paths, level=0)
+        print("Finished tree traversal.")
+    
+        # Convert the paths dictionary into a DataFrame.
+        print("Converting paths dictionary to DataFrame.")
         df_paths = pd.DataFrame.from_dict(paths, orient='index')
-        df_paths.columns = [f'level_{i}' for i in range(1, df_paths.shape[1]+1)]
-        df_paths = df_paths.fillna(-1).astype(int) + 1
-        df_paths.to_hdf("splithistory_allbrains.h5ad", key="table")
+        print("Shape of df_paths before filling NAs:", df_paths.shape)
+        max_level = df_paths.shape[1]
+        df_paths.columns = [f'level_{i}' for i in range(1, max_level + 1)]
+        df_paths = df_paths.fillna(-1)
+        df_paths = df_paths.astype(int) + 1  # Adjusting labels to be 1-indexed
+        print("Final df_paths head:\n", df_paths.head())
+    
+        # Save the split history to file.
+        print("Saving df_paths to HDF5 file 'splithistory_all.h5ad'")
+        df_paths.to_hdf("splithistory_all.h5ad", key="table")
+        
+        print("=== Finished apply_euclid_clustering ===\n")
         return df_paths
 
     # -------------------------------------------------------------------------
