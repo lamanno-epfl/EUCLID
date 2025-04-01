@@ -1,569 +1,689 @@
-# draft code to plot a bunch of early dataset composition statistics [to be strongly updated knowing the adata structure we're working with and avoiding wasted precomputations where available elsewhere in the package)
-def extract_class(lipid_name):
-    """
-    Extract the lipid class from a lipid name.
-    Handles cases like "PC O-36:4" where we want to capture "PC O".
-    This regex looks for one or more alphanumeric characters followed by an
-    optional " O" (with or without a space) and then a space or dash.
-    """
-    m = re.match(r'^([A-Za-z0-9]+(?:\s?O)?)[\s-]', lipid_name)
-    if m:
-        return m.group(1)
-    else:
-        return lipid_name.split()[0]
+"""
+plotting.py – Production-ready plotting module for EUCLID
 
-# Test the extraction with a few examples
-test_lipids = ["PC O-36:4", "PC-36:4", "PE O-38:6", "PE-38:6"]
-for lip in test_lipids:
-    print(f"{lip} -> {extract_class(lip)}")
+All plots are saved in a folder named "plots" (created if it does not exist) in PDF format.
+Scatter plots are rasterized and other elements remain vectorial.
+All adjustable parameters are exposed in the function signatures.
+This module integrates your original draft details – for example, median-based vmin/vmax calculations,
+dynamic grid layouts for multi-section plots, filtering by metadata, and hierarchical lipizone plotting
+(using a user-provided hierarchical level to determine modal "lipizone_color").
+  
+Expected AnnData structure example:
+    obs: 'SectionID', 'x', 'y', 'Path', 'Sample', 'Sex', 'Condition', 'Section', 'BadSection',
+         'X_Leiden', 'X_Euclid', 'lipizone_colors', 'allen_division', 'border', 'acronym', etc.
+    uns: 'feature_selection_scores', 'neighbors'
+    obsm: 'X_NMF', 'X_Harmonized', 'X_approximated', 'X_TSNE', 'X_restored'
+    obsp: 'distances', 'connectivities'
+"""
 
-df["class"] = df["lipid_name"].apply(extract_class)
-
-# Extract number of carbons and insaturations from the lipid name
-df["carbons"] = df["lipid_name"].apply(
-    lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
-)
-df["insaturations"] = df["lipid_name"].apply(
-    lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
-)
-df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
-df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
-
-# Mark broken entries based on naming convention (e.g., ending with '_uncertain')
-df["broken"] = df["lipid_name"].str.endswith('_uncertain')
-df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
-
-# Map colors from an external file
-colors = pd.read_hdf("lipidclasscolors.h5ad", key="table")
-df['color'] = df['class'].map(colors['classcolors'])
-df.loc[df["broken"], 'color'] = "gray"
-
-# Set index and remove duplicates
-df.index = df['lipid_name']
-df = df.drop_duplicates()
-df['color'] = df['color'].fillna("black")
-
+import os
+import re
+import math
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import seaborn as sns
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-mpl.rcParams['pdf.fonttype'] = 42
-classvalues = df['class'].value_counts()
-pie_colors = [color_dict.get(cls, 'black') for cls in classvalues.index]
-
-plt.figure(figsize=(8, 8))
-classvalues.plot.pie(
-    colors=pie_colors, 
-    autopct='%1.1f%%', 
-    startangle=90, 
-    textprops={'fontsize': 10}
-)
-plt.ylabel('')  # Hide the y-label
-plt.title("Lipid class cardinality of species in whole-brain MSI")
-plt.savefig("msi_prop.pdf")
-plt.show()
-
-meanmoranperpeak = annowmoran.iloc[:, -138:].mean(axis=1)
-meanmoranperpeak.index = annowmoran['Annotation']
-meanmoranperpeak = meanmoranperpeak.fillna(0)
-#meanmoranperpeak = meanmoranperpeak.loc[~pd.isna(meanmoranperpeak)] ##### drop the nans
-#meanmoranperpeak = meanmoranperpeak.loc[meanmoranperpeak.index != "_db"]# drop the unannotated
-
-meanmoranperpeak.sort_values()[::-1] # 391 got an annotation and above zero Moran's, also including those with naming that is not confident.
-
-atlas = pd.read_parquet("atlas.parquet")
-import re
-import numpy as np
-import pandas as pd
-
-# Example: assume quantlcms.index contains your lipid names
-df = pd.DataFrame(meanmoranperpeak.index).fillna('')
-df.columns = ["lipid_name"]
-df['Score'] = annowmoran['Score'].values
-df['mz'] = annowmoran.index.values
-df
-
-def extract_class(lipid_name):
-    """
-    Extract the lipid class from a lipid name.
-    Handles cases like "PC O-36:4" where we want to capture "PC O".
-    This regex looks for one or more alphanumeric characters followed by an
-    optional " O" (with or without a space) and then a space or dash.
-    """
-    m = re.match(r'^([A-Za-z0-9]+(?:\s?O)?)[\s-]', lipid_name)
-    if m:
-        return m.group(1)
-    else:
-        return lipid_name.split()[0]
-
-# Test the extraction with a few examples
-test_lipids = ["PC O-36:4", "PC-36:4", "PE O-38:6", "PE-38:6"]
-for lip in test_lipids:
-    print(f"{lip} -> {extract_class(lip)}")
-
-df["class"] = df["lipid_name"].apply(extract_class)
-
-# Extract number of carbons and insaturations from the lipid name
-df["carbons"] = df["lipid_name"].apply(
-    lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
-)
-df["insaturations"] = df["lipid_name"].apply(
-    lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
-)
-df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
-df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
-
-# Mark broken entries based on naming convention (e.g., ending with '_uncertain')
-df["broken"] = df["lipid_name"].str.endswith('_uncertain')
-df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
-
-# Map colors from an external file
-colors = pd.read_hdf("lipidclasscolors.h5ad", key="table")
-df['color'] = df['class'].map(colors['classcolors'])
-df.loc[df["broken"], 'color'] = "gray"
-
-# Set index and remove duplicates
-
-df['color'] = df['color'].fillna("black")
-
-df
-
-mean_series = meanmoranperpeak.rename('quant')
-df['quant'] = mean_series.values
-extra_classes = {'CerP', 'LPA', 'PIP O', 'PGP', 'PA', 'CAR', 'ST', 'PA O', 'CoA', 'MG', 'SHexCer', 'LPE O'}
-
-color_dict.update({cls: "gray" for cls in extra_classes})
-
-df.loc[df['class'].isin(['CerP', 'LPA', 'PIP O', 'PGP', 'PA', 'CAR', 'ST', 'PA O', 'CoA', 'MG', 'SHexCer']),'class'] = "others"
-df.loc[df['lipid_name'].str.contains("_db"), 'class'] = "others"
-color_dict.update({cls: "gray" for cls in ["others"]})
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import Normalize, rgb_to_hsv, hsv_to_rgb
+from matplotlib.cm import ScalarMappable
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from adjustText import adjust_text
+from PyPDF2 import PdfMerger
 
-# Compute the order of classes by ascending median of quant
-order = df.groupby('class')['quant'].median().sort_values().index.tolist()
+mpl.rcParams['pdf.fonttype'] = 42
 
-# Create a single figure and axis
-fig, ax = plt.subplots(figsize=(12, 8))
+# Ensure the "plots" folder exists.
+PLOTS_DIR = "plots"
+if not os.path.exists(PLOTS_DIR):
+    os.makedirs(PLOTS_DIR)
 
-# Plot the boxplot
-sns.boxplot(data=df, x='class', y='quant', order=order, 
-            palette=color_dict, showfliers=False, ax=ax)
+class Plotting:
+    """
+    Provides a suite of plotting functions for EUCLID outputs.
 
-# Overlay the individual data points using a stripplot
-sns.stripplot(data=df, x='class', y='quant', order=order, 
-              color='black', alpha=0.5, size=3, jitter=True, ax=ax)
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing processed MSI data.
+    coordinates : pd.DataFrame
+        DataFrame with spatial coordinates (e.g. 'Section', 'xccf', 'yccf', 'zccf').
+    extra_data : dict, optional
+        Additional data (e.g. feature selection scores) stored in adata.uns or elsewhere.
+    """
+    def __init__(self, adata, coordinates, extra_data=None):
+        self.adata = adata
+        self.coordinates = coordinates
+        self.extra_data = extra_data if extra_data is not None else {}
 
-# Add a dark red dashed horizontal line at y=0.4
-ax.axhline(y=0.4, color='darkred', linestyle='--')
+    @staticmethod
+    def extract_class(lipid_name: str) -> str:
+        """
+        Extract the lipid class from a lipid name.
+        
+        Parameters
+        ----------
+        lipid_name : str
+            Lipid name (e.g., "PC O-36:4").
+        
+        Returns
+        -------
+        str
+            Extracted lipid class (e.g., "PC O").
+        """
+        m = re.match(r'^([A-Za-z0-9]+(?:\s?O)?)[\s-]', lipid_name)
+        if m:
+            return m.group(1)
+        else:
+            return lipid_name.split()[0]
 
-# Set the y-limit to stop at 1
-ax.set_ylim(0, 1)
+    def prepare_lipid_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Process a DataFrame with a 'lipid_name' column to extract lipid class,
+        number of carbons, insaturations, and to map colors from an external file.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame that includes a column 'lipid_name'.
+        
+        Returns
+        -------
+        pd.DataFrame
+            Updated DataFrame with additional columns.
+        """
+        df = df.copy()
+        df["class"] = df["lipid_name"].apply(self.extract_class)
+        df["carbons"] = df["lipid_name"].apply(
+            lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
+        )
+        df["insaturations"] = df["lipid_name"].apply(
+            lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
+        )
+        df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
+        df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
+        df["broken"] = df["lipid_name"].str.endswith('_uncertain')
+        df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
+        try:
+            colors_df = pd.read_hdf("lipidclasscolors.h5ad", key="table")
+            color_dict = colors_df["classcolors"].to_dict()
+        except Exception:
+            color_dict = {}
+        df['color'] = df['class'].map(color_dict).fillna("black")
+        df.index = df["lipid_name"]
+        df = df.drop_duplicates()
+        return df
 
-# Remove spines for a cleaner look.
-sns.despine(ax=ax)
+    def plot_lipid_class_pie(self, lipid_df: pd.DataFrame, class_column: str = "class",
+                             show_inline: bool = False) -> None:
+        """
+        Plot a pie chart showing the distribution of lipid classes.
+        
+        Parameters
+        ----------
+        lipid_df : pd.DataFrame
+            DataFrame containing lipid information.
+        class_column : str, optional
+            Column name for lipid classes.
+        show_inline : bool, optional
+            If True, display the plot inline.
+        """
+        class_counts = lipid_df[class_column].value_counts()
+        palette = sns.color_palette("pastel", len(class_counts))
+        color_dict = dict(zip(class_counts.index, palette))
+        plt.figure(figsize=(8, 8))
+        ax = class_counts.plot.pie(colors=[color_dict.get(cls, "black") for cls in class_counts.index],
+                                   autopct='%1.1f%%', startangle=90, textprops={'fontsize': 10})
+        ax.set_ylabel('')
+        plt.title("Lipid Class Distribution")
+        save_path = os.path.join(PLOTS_DIR, "msi_prop.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
 
-# Annotate all points with quant > 1 using label repulsion.
-texts = []
-for idx, row in df[df['quant'] > 1].iterrows():
-    # Determine the base x coordinate from the class order:
-    cat = row['class']
-    try:
-        x_center = order.index(cat)
-    except ValueError:
-        continue  # skip if class not in order (shouldn't happen)
-    jitter = np.random.uniform(-0.1, 0.1)
-    x = x_center + jitter
-    y = row['quant']
-    t = ax.text(x, y, row['lipid_name'], fontsize=20, ha='center', va='bottom')
-    texts.append(t)
+    def plot_moran_by_class(self, annowmoran: pd.DataFrame, show_inline: bool = False) -> None:
+        """
+        Plot a boxplot (with an overlaid stripplot) of mean Moran's I by lipid class.
+        
+        Parameters
+        ----------
+        annowmoran : pd.DataFrame
+            DataFrame with columns 'lipid_name', 'quant' (mean Moran's I), etc.
+        show_inline : bool, optional
+            If True, display the plot inline.
+        """
+        df = annowmoran.copy()
+        df["class"] = df["lipid_name"].apply(self.extract_class)
+        df["carbons"] = df["lipid_name"].apply(
+            lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
+        )
+        df["insaturations"] = df["lipid_name"].apply(
+            lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
+        )
+        df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
+        df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
+        df["broken"] = df["lipid_name"].str.endswith('_uncertain')
+        df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
+        try:
+            colors_df = pd.read_hdf("lipidclasscolors.h5ad", key="table")
+            color_dict = colors_df["classcolors"].to_dict()
+        except Exception:
+            color_dict = {}
+        df['color'] = df['class'].map(color_dict).fillna("black")
+        df.index = df["lipid_name"]
+        df = df.drop_duplicates()
+        order = df.groupby("class")["quant"].median().sort_values().index.tolist()
+        plt.figure(figsize=(12, 8))
+        ax = sns.boxplot(data=df, x="class", y="quant", order=order, palette=color_dict, showfliers=False)
+        sns.stripplot(data=df, x="class", y="quant", order=order, color="black", alpha=0.5, size=3)
+        ax.axhline(y=0.4, color="darkred", linestyle="--")
+        ax.set_ylim(0, 1)
+        sns.despine(ax=ax)
+        ax.set_xlabel("Lipid Class")
+        ax.set_ylabel("Mean Moran's I")
+        ax.set_title("Spatial Evaluation by Mean Moran's I")
+        save_path = os.path.join(PLOTS_DIR, "moranbyclass.pdf")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
 
-# Final touches: rotate x-axis labels, add axis labels and title.
-plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-ax.set_xlabel("Lipid Class")
-ax.set_ylabel("Lipid-wise mean Moran's I across sections")
-ax.set_title("Spatial evaluation of lipids by average Moran's I")
+    def plot_lipid_distribution(self,
+                                  data: pd.DataFrame,
+                                  lipid: str,
+                                  section_filter: list = None,
+                                  metadata_filter: dict = None,
+                                  lipizone_filter: dict = None,
+                                  x_range: tuple = None,
+                                  y_range: tuple = None,
+                                  z_range: tuple = None,
+                                  layout: tuple = None,
+                                  point_size: float = 5,
+                                  show_contours: bool = True,
+                                  contour_column: str = "border",
+                                  show_inline: bool = False) -> None:
+        """
+        Plot the spatial distribution of a given lipid with extensive filtering and cropping options.
+        
+        Options:
+          - Filter by sections (section_filter).
+          - Filter by metadata (metadata_filter, e.g. {"division": [...]})
+          - Filter by lipizone (lipizone_filter, e.g. {"lipizone_names": [...]})
+          - Crop by x, y, and/or z ranges.
+          - Layout is computed dynamically (aiming for a ~4:3 page ratio) if not provided.
+          - Optionally overlay anatomical contours.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame with spatial columns ('zccf', 'yccf', 'xccf', 'Section') and lipid values.
+        lipid : str
+            Column name (feature) to plot.
+        section_filter : list, optional
+            List of section numbers to include.
+        metadata_filter : dict, optional
+            Dictionary of {column: [accepted_values]} for filtering.
+        lipizone_filter : dict, optional
+            Dictionary to filter based on lipizone metadata.
+        x_range, y_range, z_range : tuple, optional
+            Tuples (min, max) to crop data along the respective axes.
+        layout : tuple, optional
+            Grid layout (nrows, ncols). If None, computed dynamically.
+        point_size : float, optional
+            Marker size.
+        show_contours : bool, optional
+            If True, overlay contours based on contour_column.
+        contour_column : str, optional
+            Column name indicating anatomical contours.
+        show_inline : bool, optional
+            If True, display plot inline.
+        """
+        df = data.copy()
+        if metadata_filter:
+            for col, accepted in metadata_filter.items():
+                df = df[df[col].isin(accepted)]
+        if section_filter is not None:
+            df = df[df["Section"].isin(section_filter)]
+        if lipizone_filter:
+            for col, accepted in lipizone_filter.items():
+                df = df[df[col].isin(accepted)]
+        if x_range is not None:
+            df = df[(df["xccf"] >= x_range[0]) & (df["xccf"] <= x_range[1])]
+        if y_range is not None:
+            df = df[(df["yccf"] >= y_range[0]) & (df["yccf"] <= y_range[1])]
+        if z_range is not None:
+            df = df[(df["zccf"] >= z_range[0]) & (df["zccf"] <= z_range[1])]
 
-plt.tight_layout()
-plt.savefig("moranbyclass.pdf")
-plt.show()
-
-
-
-
-
-# draft code to plot lipid distributions(ADD optionally with anatomical contours, optionally filtering by metadata - division in the example)
-# one could also select by metadata such as division etc (custom) a subset of the organ to display instead of going full-organ, passing a list of divisions/lipizones/selected metadata column unique categorical entries to show
-# one could also select which lipizones to plot; layout should be computed dynamically to yield an approx 4/3 tyypical page layout
-# the user can also provide a set of x, y, z ranges, in which cases before plotting we crop stuff withing those ranges (not necessarily all the three should be provided, if not provided we keep all along that specific axis)
-with PdfPages('ranking_clustering_featsel.pdf') as pdf:
-    for currentPC in tqdm(np.array(scores['spatvar'].astype(float).astype(str))):
+        unique_sections = sorted(df["Section"].unique())
+        n_sections = len(unique_sections)
+        if n_sections == 0:
+            print("No sections to plot after filtering.")
+            return
+        # For each section, compute 2nd and 98th percentiles for the given lipid; then take medians.
         results = []
-        filtered_data = pd.concat([data[['yccf','zccf','Section']], data.loc[:,str(currentPC)]], axis=1)[::5] #### ds to go faster
+        for sec in unique_sections:
+            subset = df[df["Section"] == sec]
+            perc2 = subset[lipid].quantile(0.02)
+            perc98 = subset[lipid].quantile(0.98)
+            results.append([sec, perc2, perc98])
+        percentile_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
+        med2p = percentile_df["2-perc"].median()
+        med98p = percentile_df["98-perc"].median()
+        # Global axis limits.
+        global_min_z = df["zccf"].min()
+        global_max_z = df["zccf"].max()
+        global_min_y = -df["yccf"].max()
+        global_max_y = -df["yccf"].min()
+        # Dynamic layout: if not provided, compute a grid aiming for a 4:3 ratio.
+        if layout is None:
+            ncols = math.ceil(math.sqrt(n_sections * 4 / 3))
+            nrows = math.ceil(n_sections / ncols)
+        else:
+            nrows, ncols = layout
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
+        axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
+        for idx, sec in enumerate(unique_sections):
+            ax = axes[idx]
+            sec_data = df[df["Section"] == sec]
+            ax.scatter(sec_data["zccf"], -sec_data["yccf"],
+                       c=sec_data[lipid], cmap="plasma", s=point_size,
+                       alpha=0.8, rasterized=True, vmin=med2p, vmax=med98p)
+            ax.set_aspect("equal")
+            ax.axis("off")
+            ax.set_xlim(global_min_z, global_max_z)
+            ax.set_ylim(global_min_y, global_max_y)
+            ax.set_title(f"Section {sec}", fontsize=10)
+            if show_contours and (contour_column in sec_data.columns):
+                contour_data = sec_data[sec_data[contour_column] == 1]
+                ax.scatter(contour_data["zccf"], -contour_data["yccf"],
+                           c="black", s=point_size/2, alpha=0.5, rasterized=True)
+        for j in range(idx+1, len(axes)):
+            fig.delaxes(axes[j])
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, f"{lipid}_distribution.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
 
-        for section in filtered_data['Section'].unique():
-            subset = filtered_data[filtered_data['Section'] == section]
-
-            perc_2 = subset[str(currentPC)].quantile(0.02)
-            perc_98 = subset[str(currentPC)].quantile(0.98)
-
-            results.append([section, perc_2, perc_98])
-        percentile_df = pd.DataFrame(results, columns=['Section', '2-perc', '98-perc'])
-        med2p = percentile_df['2-perc'].median()
-        med98p = percentile_df['98-perc'].median()
-
-        cmap = plt.cm.inferno
-
-        fig, axes = plt.subplots(4, 8, figsize=(20, 10))
+    def plot_embeddings(self,
+                        currentProgram: str = 'headgroup_with_negative_charge',
+                        layout: tuple = (4, 8),
+                        point_size: float = 0.5,
+                        cmap_name: str = "PuOr",
+                        show_inline: bool = False) -> None:
+        """
+        Plot spatial embeddings using the same strategy as for lipids.
+        
+        For each section (1 to 32), compute the 2nd and 98th percentiles for the specified
+        program (a column in data), take the median of these percentiles across sections, and plot.
+        
+        Parameters
+        ----------
+        currentProgram : str, optional
+            The column in self.adata.obs (or provided data) to use for coloring.
+        layout : tuple, optional
+            Grid layout (nrows, ncols) for the subplots. Default is (4, 8).
+        point_size : float, optional
+            Marker size.
+        cmap_name : str, optional
+            Name of the colormap.
+        show_inline : bool, optional
+            Whether to display the plot inline.
+        """
+        # Assume that self.adata.obs contains columns 'Section', 'zccf', 'yccf',
+        # and a column named currentProgram.
+        data = self.adata.obs.copy()
+        # Prepare results from each section.
+        results = []
+        for sec in data["Section"].unique():
+            subset = data[data["Section"] == sec]
+            perc2 = subset[currentProgram].quantile(0.02)
+            perc98 = subset[currentProgram].quantile(0.98)
+            results.append([sec, perc2, perc98])
+        percentile_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
+        med2p = percentile_df["2-perc"].median()
+        med98p = percentile_df["98-perc"].median()
+        cmap = plt.get_cmap(cmap_name)
+        n_sections = 32  # as in original (sections 1 to 32)
+        nrows, ncols = layout
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.5, nrows * 2.5))
         axes = axes.flatten()
-
-        for section in range(1, 33):
-            ax = axes[section - 1]
-            ddf = filtered_data[(filtered_data['Section'] == section)]
-
-            ax.scatter(ddf['zccf'], -ddf['yccf'], c=ddf[str(currentPC)], cmap="plasma", s=2.0, alpha=0.8,rasterized=True, vmin=med2p, vmax=med98p) 
-            ax.axis('off')
-            ax.set_aspect('equal')
-
+        for sec in range(1, n_sections+1):
+            ax = axes[sec - 1]
+            ddf = data[data["Section"] == sec]
+            ax.scatter(ddf["zccf"], -ddf["yccf"],
+                       c=ddf[currentProgram], cmap=cmap, s=point_size,
+                       rasterized=True, vmin=med2p, vmax=med98p)
+            ax.axis("off")
+            ax.set_aspect("equal")
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = Normalize(vmin=med2p, vmax=med98p)
-        sm = ScalarMappable(norm=norm, cmap="plasma")
+        sm = ScalarMappable(norm=norm, cmap=cmap)
         fig.colorbar(sm, cax=cbar_ax)
-
         plt.tight_layout(rect=[0, 0, 0.9, 1])
-        pdf.savefig(fig) 
-        plt.close(fig)
-
-
-
-# draft code to plot embeddings(ADD optionally with anatomical contours, optionally filtering by metadata - division in the example)
-# one could also select by metadata such as division etc (custom) a subset of the organ to display instead of going full-organ
-# one could also select which lipizones to plot; layout should be computed dynamically to yield an approx 4/3 tyypical page layout
-currentProgram = 'headgroup_with_negative_charge'
-for section in data['Section'].unique():
-    subset = data[data['Section'] == section]
-
-    perc_2 = subset[currentProgram].quantile(0.02)
-    perc_98 = subset[currentProgram].quantile(0.98)
-
-    results.append([section, perc_2, perc_98])
-percentile_df = pd.DataFrame(results, columns=['Section', '2-perc', '98-perc'])
-med2p = percentile_df['2-perc'].median()
-med98p = percentile_df['98-perc'].median()
-
-cmap = plt.cm.PuOr
-
-fig, axes = plt.subplots(4, 8, figsize=(20, 10))
-axes = axes.flatten()
-
-for section in range(1, 33):
-    ax = axes[section - 1]
-    ddf = data[(data['Section'] == section)]
-
-    ax.scatter(ddf['zccf'], -ddf['yccf'], c=ddf[currentProgram], cmap="PuOr", s=0.5,rasterized=True, vmin=med2p, vmax=med98p) 
-    ax.axis('off')
-    ax.set_aspect('equal')
-
-cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-norm = Normalize(vmin=med2p, vmax=med98p)
-sm = ScalarMappable(norm=norm, cmap="PuOr")
-fig.colorbar(sm, cax=cbar_ax)
-
-plt.tight_layout(rect=[0, 0, 0.9, 1])
-plt.show()
-
-
-
-
-# draft code to plot lipizones (optionally with anatomical contours, optionally filtering by metadata - division in the example)
-# one could also select by metadata such as division etc (custom) a subset of the organ to display instead of going full-organ
-# one could also select which lipizones to plot; layout should be computed dynamically to yield an approx 4/3 tyypical page layout
-# one could also decide which hierarchical level to plot, like level_1, level_2,... in that case, the color should be for each unique combination of level values down to that level the modal "lipizone_color" value (i.e., most frequent across pixels having that level_'s combination)
-unique_sections = data["Section"].unique()
-
-fig, axs = plt.subplots(4, 8, figsize=(32, 16))
-axs = axs.flatten()
-
-for i, section_value in enumerate(unique_sections):
-    if i >= len(axs):
-        break
-    ax = axs[i]
-    section = data[data["Section"] == section_value]
-    filtered_section = section.loc[section['division'].isin(['Isocortex']),:]
-
-    ax.scatter(filtered_section['z_index'], -filtered_section['y_index'],
-                    c=filtered_section['lipizone_color'], s=0.05,
-                    alpha=1, zorder=1, rasterized=True)  
-
-    filtered_section_contour = section.loc[section['boundary'] == 1,:]
-    ax.scatter(filtered_section_contour['z_index'], -filtered_section_contour['y_index'],
-                    c='black', s=0.01, rasterized=True, zorder=2, alpha=0.9)
- 
-    ax.set_aspect('equal')
-    
-for ax in axs:
-    ax.axis('off') 
-
-plt.tight_layout()
-plt.show()
-
-
-
-# draft code to plot tsne with desired coloring from any metadata both by user and compèuted such as lipizone colors
-plt.scatter(tsne[:, 0], tsne[:, 1], c=data.loc[:, 'lipizone_color'], s=0.0001, alpha=0.9, rasterized=True)
-plt.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False)
-for spine in plt.gca().spines.values():
-    spine.set_visible(False)
-plt.show()
-
-
-
-# draft code to plot a sorted heatmap (should already be properly normalized, if flag normalized is false, the method should make the rows relative so they sum to one
-linkage = sch.linkage(sch.distance.pdist(normalized_df.T), method='weighted', optimal_ordering=True)
-order = sch.leaves_list(linkage)
-normalized_df = normalized_df.iloc[:, order]
-order = np.argmax(normalized_df.values, axis=1)
-order = np.argsort(order)
-normalized_df = normalized_df.iloc[order,:]
-# let user decide on xticklabels and yticklabels and on vmin and vmax but defaulting to my values as usual
-plt.figure(figsize=(20, 5))
-sns.heatmap(normalized_df, cmap="Grays", cbar_kws={'label': 'Enrichment'}, xticklabels=False, yticklabels=False, vmin = np.percentile(normalized_df, 2), vmax = np.percentile(normalized_df, 98))
-# add axes labels provided by user
-plt.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)
-plt.tick_params(axis='y', which='both', left=False, right=False)
-plt.yticks(rotation=0)
-plt.tight_layout()
-plt.show()
-
-
-
-# draft code to plot few selected lipizones or level_x column values at a time on a lightgray background, optionally with anatomical contours
-
-
-
-
-# draft code to plot a dendrogram from selected sorted list of values (make it more general than it is)
-import numpy as np
-from scipy.cluster.hierarchy import dendrogram
-import matplotlib.pyplot as plt
-# Define the leaf labels in the desired order
-labels = [...]
-def generate_custom_linkage():
-    """
-    Generates a custom linkage matrix for 16 leaves arranged in a balanced binary tree,
-    with all branches of the same length.
-    """
-    # Number of original observations (leaves)
-    n = 16
-    # Initialize an empty linkage matrix with (n-1) rows and 4 columns, dtype=float
-    linkage_matrix = np.zeros((n - 1, 4), dtype=float)
-    
-    # Initialize cluster indices
-    current_cluster = n  # Clusters are indexed from n onwards
-
-    # Define pairs to merge at each level
-    # Level 1: Merge adjacent leaves
-    level1_pairs = [
-        (0, 1),
-        (2, 3),
-        (4, 5),
-        (6, 7),
-        (8, 9),
-        (10, 11),
-        (12, 13),
-        (14, 15)
-    ]
-    
-    # Assign first 8 merges (Level 1)
-    for i, (a, b) in enumerate(level1_pairs):
-        linkage_matrix[i, 0] = a
-        linkage_matrix[i, 1] = b
-        linkage_matrix[i, 2] = 1.0  # Distance for Level 1
-        linkage_matrix[i, 3] = 2      # Number of samples in the new cluster
-
-    # Level 2: Merge the clusters formed in Level 1
-    level2_pairs = [
-        (current_cluster, current_cluster + 1),
-        (current_cluster + 2, current_cluster + 3),
-        (current_cluster + 4, current_cluster + 5),
-        (current_cluster + 6, current_cluster + 7)
-    ]
-    
-    for i, (a, b) in enumerate(level2_pairs, start=8):
-        linkage_matrix[i, 0] = a
-        linkage_matrix[i, 1] = b
-        linkage_matrix[i, 2] = 2.0  # Distance for Level 2
-        linkage_matrix[i, 3] = 4      # Number of samples
-
-    # Update current_cluster
-    current_cluster += 8
-
-    # Level 3: Merge the clusters formed in Level 2
-    level3_pairs = [
-        (current_cluster, current_cluster + 1),
-        (current_cluster + 2, current_cluster + 3)
-    ]
-    
-    for i, (a, b) in enumerate(level3_pairs, start=12):
-        linkage_matrix[i, 0] = a
-        linkage_matrix[i, 1] = b
-        linkage_matrix[i, 2] = 3.0  # Distance for Level 3
-        linkage_matrix[i, 3] = 8      # Number of samples
-
-    # Update current_cluster
-    current_cluster += 4
-
-    # Level 4: Final merge to form the root
-    linkage_matrix[14, 0] = current_cluster
-    linkage_matrix[14, 1] = current_cluster + 1
-    linkage_matrix[14, 2] = 4.0      # Distance for Level 4
-    linkage_matrix[14, 3] = 16         # Number of samples
-
-    return linkage_matrix
-
-# Generate the custom linkage matrix
-linkage_matrix = generate_custom_linkage()
-# Verify that the linkage matrix contains floats
-assert linkage_matrix.dtype == float, "Linkage matrix must be of float type."
-# Create the dendrogram plot
-plt.figure(figsize=(14, 10))  # Adjust figure size as needed
-dendro = dendrogram(
-    linkage_matrix,
-    orientation='left',
-    color_threshold=0,               # All links colored the same
-    above_threshold_color='black',   # Color of the links
-    labels=labels,                   # Assign the custom labels
-    leaf_font_size=10,               # Adjust font size for readability
-    show_leaf_counts=False,          # Do not show leaf counts
-    no_labels=False,                 # Show labels
-    link_color_func=lambda k: 'black'  # All links in black
-)
-# Style the plot
-ax = plt.gca()
-# Remove spines for a cleaner look
-for spine in ['top', 'right', 'bottom', 'left']:
-    ax.spines[spine].set_visible(False)
-# Remove ticks
-ax.tick_params(axis='both', which='both', length=0)
-# Remove x-ticks
-plt.xticks([])
-# Adjust y-ticks font size
-plt.yticks(fontsize=10)
-plt.xlabel('Distance')  # Optionally add an axis label
-plt.tight_layout()
-# Display the dendrogram
-plt.show()
-
-
-
-# draft code to plot a sorted barplot for differential lipids colored by their class
-import numpy as np
-from adjustText import adjust_text
-
-meansus = coeffmap.mean()
-meansus = meansus.sort_values()[:-1] ## the top 1 is clearly the only batch effect - escaped one, it's untrusted
-dfff = pd.DataFrame(meansus)
-colors = df.loc[dfff.index, 'color'].fillna("black")
-
-plt.figure(figsize=(10, 6))
-bars = plt.bar(range(len(dfff)), dfff.iloc[:,0], color=colors)
-n_items = len(dfff)
-bottom_5 = list(range(5))
-top_5 = list(range(n_items-5, n_items))
-middle_start = 5
-middle_end = n_items - 5
-middle_5 = list(np.random.choice(range(middle_start, middle_end), 5, replace=False))
-indices_to_label = sorted(bottom_5 + middle_5 + top_5)
-
-texts = []
-for idx in indices_to_label:
-    x = idx
-    y = dfff.iloc[idx, 0]
-    label = dfff.index[idx]
-    texts.append(plt.text(x, y, label, ha='center', va='bottom'))
-
-adjust_text(texts, 
-           arrowprops=dict(arrowstyle='->', color='gray', lw=0.5),
-           expand_points=(1.5, 1.5))
-
-plt.gca().spines['top'].set_visible(False)
-plt.gca().spines['right'].set_visible(False)
-plt.ylabel('Mean susceptibility across the whole brain')
-plt.xlabel("Sorted lipid species")
-plt.xticks([])
-plt.tight_layout()
-plt.savefig("meansusc_pregnancy.pdf")
-plt.show()
-
-
-
-# plot a scatterplot with two continuous variables stored in the adata object, be them lipids, embeddings, other stored modalities etc, coloring by anything in the adata, be it continuous or categorical color label value
-
-
-
-# draft code to plot sample-sample correlation through PCA and heatmap based on normalized lipid expression centroids across a selected level_x (here supertypes, make generic to be passed)
-datemp = lips.copy() 
-p2 = datemp.quantile(0.005)
-p98 = datemp.quantile(0.995)
-
-datemp_values = datemp.values
-p2_values = p2.values
-p98_values = p98.values
-
-normalized_values = (datemp_values - p2_values) / (p98_values - p2_values)
-
-clipped_values = np.clip(normalized_values, 0, 1)
-
-normalized_datemp = pd.DataFrame(clipped_values, columns=datemp.columns, index=datemp.index)
-centroids = normalized_datemp.groupby([metadata['Sample'], splits['supertype']]).mean()
-centroids = centroids.unstack()
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-
-scaler = StandardScaler()
-scaled_data = pd.DataFrame(scaler.fit_transform(centroids), 
-                          index=centroids.index, 
-                          columns=centroids.columns)
-
-pca = PCA(n_components=3)
-pca_result = pca.fit_transform(scaled_data)
-
-var_explained = pca.explained_variance_ratio_ * 100
-
-fig = plt.figure(figsize=(12,12))
-ax = fig.add_subplot(111, projection='3d')
-
-scatter = ax.scatter(pca_result[:, 0], 
-                    pca_result[:, 1], 
-                    pca_result[:, 2],
-                    c=colors, s=350, alpha=1)
-
-ax.set_xlabel(f'PC1 ({var_explained[0]:.1f}% variance)')
-ax.set_ylabel(f'PC2 ({var_explained[1]:.1f}% variance)')
-ax.set_zlabel(f'PC3 ({var_explained[2]:.1f}% variance)')
-ax.set_xticks([])
-ax.set_yticks([])
-ax.set_zticks([])
-
-plt.title('3D PCA of Centroids')
-plt.savefig("pca_mfpreg.pdf")
-plt.show()
-sns.clustermap(centroids.T.corr())
-plt.savefig("inter_samplecorrelation.pdf")
-
-
-# plot 3d renderings using plotly
-### keep it as a placeholder
-
-# plot 2d renderings using plotly with zoomability
-### keep it as a placeholder
-
-# viz clock
-### keep it as a placeholder
-
-# make movies
-### keep it as a placeholder
+        save_path = os.path.join(PLOTS_DIR, f"{currentProgram}_embeddings.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_lipizones(self, levels: pd.DataFrame,
+                       lipizone_col: str = "lipizone_names",
+                       section_col: str = "Section",
+                       level_filter: str = None,
+                       show_inline: bool = False) -> None:
+        """
+        Plot lipizones (clusters) with flexible options.
+        
+        Options include:
+          - Filtering by metadata (e.g., division) can be applied before.
+          - If level_filter is provided (e.g., "level_2"), then for each unique combination
+            of levels up to that level the effective color is taken as the mode of 'lipizone_color'.
+          - Layout is computed dynamically to yield a roughly 4:3 page.
+        
+        Parameters
+        ----------
+        levels : pd.DataFrame
+            DataFrame including spatial coordinates ('zccf','yccf'), section (section_col),
+            and lipizone labels.
+        lipizone_col : str, optional
+            Column with lipizone labels.
+        section_col : str, optional
+            Column with section numbers.
+        level_filter : str, optional
+            Hierarchical level to use for color determination (e.g., "level_1", "level_2").
+        show_inline : bool, optional
+            Whether to display the plot inline.
+        """
+        df = levels.copy()
+        # If a level_filter is provided, compute the modal lipizone_color for each unique combination
+        if level_filter is not None and level_filter in df.columns:
+            grouping_cols = [col for col in df.columns if col.startswith("level_") and int(col.split("_")[1]) <= int(level_filter.split("_")[1])]
+            modal = df.groupby(grouping_cols)["lipizone_color"].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else "gray")
+            # Map each observation to its modal color
+            def get_modal(row):
+                key = tuple(row[col] for col in grouping_cols)
+                return modal.get(key, row["lipizone_color"])
+            df["plot_color"] = df.apply(get_modal, axis=1)
+        else:
+            df["plot_color"] = df["lipizone_color"]
+
+        unique_sections = sorted(df[section_col].unique())
+        n_sections = len(unique_sections)
+        if n_sections == 0:
+            print("No sections to plot.")
+            return
+        global_min_z = df["zccf"].min()
+        global_max_z = df["zccf"].max()
+        global_min_y = -df["yccf"].max()
+        global_max_y = -df["yccf"].min()
+        ncols = math.ceil(math.sqrt(n_sections * 4 / 3))
+        nrows = math.ceil(n_sections / ncols)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
+        axes = axes.flatten()
+        for idx, sec in enumerate(unique_sections):
+            ax = axes[idx]
+            sec_data = df[df[section_col] == sec]
+            ax.scatter(sec_data["zccf"], -sec_data["yccf"],
+                       c=sec_data["plot_color"], s=0.5, alpha=0.8, rasterized=True)
+            ax.axis("off")
+            ax.set_aspect("equal")
+            ax.set_xlim(global_min_z, global_max_z)
+            ax.set_ylim(global_min_y, global_max_y)
+            ax.set_title(f"Section {sec}", fontsize=10)
+        for j in range(idx+1, len(axes)):
+            fig.delaxes(axes[j])
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, "merged_lipizones.pdf")
+        # Optionally merge individual PDFs; here we simply save one multi-panel PDF.
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_tsne(self, tsne: np.ndarray, color_column: str = "lipizone_color",
+                  show_inline: bool = False) -> None:
+        """
+        Plot a TSNE scatter plot with coloring from a metadata column.
+        
+        Parameters
+        ----------
+        tsne : np.ndarray
+            2D array of TSNE coordinates.
+        color_column : str, optional
+            Column in adata.obs to use for color.
+        show_inline : bool, optional
+            Whether to display inline.
+        """
+        df = self.adata.obs.copy()
+        if color_column not in df.columns:
+            print(f"Warning: {color_column} not found in adata.obs; using gray.")
+            colors = "gray"
+        else:
+            colors = df[color_column]
+        plt.figure(figsize=(8, 6))
+        plt.scatter(tsne[:, 0], tsne[:, 1], c=colors, s=0.5, alpha=0.9, rasterized=True)
+        plt.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False,
+                        labelbottom=False, labelleft=False)
+        for spine in plt.gca().spines.values():
+            spine.set_visible(False)
+        save_path = os.path.join(PLOTS_DIR, "tsne.pdf")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_sorted_heatmap(self, data: pd.DataFrame, vmin: float = None, vmax: float = None,
+                            xticklabels: bool = False, yticklabels: bool = False,
+                            xlabel: str = "", ylabel: str = "", show_inline: bool = False) -> None:
+        """
+        Plot a sorted heatmap with user-defined parameters.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Data to plot.
+        vmin, vmax : float, optional
+            Color scale limits; default to 2nd and 98th percentiles.
+        xticklabels, yticklabels : bool, optional
+            Whether to show axis tick labels.
+        xlabel, ylabel : str, optional
+            Axis labels.
+        show_inline : bool, optional
+            Whether to display inline.
+        """
+        if vmin is None:
+            vmin = np.percentile(data.values, 2)
+        if vmax is None:
+            vmax = np.percentile(data.values, 98)
+        # Sort columns via hierarchical clustering
+        L = linkage(squareform(pdist(data.T)), method='weighted', optimal_ordering=True)
+        order_cols = leaves_list(L)
+        sorted_data = data.iloc[:, order_cols]
+        order_rows = np.argsort(np.argmax(sorted_data.values, axis=1))
+        sorted_data = sorted_data.iloc[order_rows, :]
+        plt.figure(figsize=(20, 5))
+        ax = sns.heatmap(sorted_data, cmap="Grays", cbar_kws={'label': 'Enrichment'},
+                         xticklabels=xticklabels, yticklabels=yticklabels, vmin=vmin, vmax=vmax)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)
+        plt.tick_params(axis='y', which='both', left=False, right=False)
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, "sorted_heatmap.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_scatter(self, x: np.ndarray, y: np.ndarray, color: np.ndarray = None,
+                     xlabel: str = "", ylabel: str = "", title: str = "",
+                     show_inline: bool = False) -> None:
+        """
+        Plot a scatterplot for two continuous variables.
+        
+        Parameters
+        ----------
+        x, y : np.ndarray
+            Data for the x and y axes.
+        color : np.ndarray, optional
+            Color values for each point.
+        xlabel, ylabel, title : str, optional
+            Labels and title.
+        show_inline : bool, optional
+            Whether to display inline.
+        """
+        plt.figure(figsize=(8, 6))
+        plt.scatter(x, y, c=color, s=10, rasterized=True)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        save_path = os.path.join(PLOTS_DIR, f"{title.replace(' ', '_')}_scatter.pdf")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_sample_correlation_pca(self, centroids: pd.DataFrame, show_inline: bool = False) -> None:
+        """
+        Plot 3D PCA of sample centroids and a clustermap of their correlation.
+        
+        Parameters
+        ----------
+        centroids : pd.DataFrame
+            DataFrame of normalized lipid expression centroids.
+        show_inline : bool, optional
+            Whether to display the plots inline.
+        """
+        scaler = StandardScaler()
+        scaled = pd.DataFrame(scaler.fit_transform(centroids), index=centroids.index, columns=centroids.columns)
+        pca = PCA(n_components=3)
+        pca_result = pca.fit_transform(scaled)
+        var_exp = pca.explained_variance_ratio_ * 100
+        fig = plt.figure(figsize=(12, 12))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(pca_result[:, 0], pca_result[:, 1], pca_result[:, 2],
+                   c="blue", s=350, alpha=1)
+        ax.set_xlabel(f'PC1 ({var_exp[0]:.1f}% var)')
+        ax.set_ylabel(f'PC2 ({var_exp[1]:.1f}% var)')
+        ax.set_zlabel(f'PC3 ({var_exp[2]:.1f}% var)')
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
+        plt.title("3D PCA of Centroids")
+        save_path = os.path.join(PLOTS_DIR, "pca_centroids.pdf")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+        cg = sns.clustermap(centroids.T.corr(), cmap="viridis", figsize=(10, 10))
+        cg.savefig(os.path.join(PLOTS_DIR, "sample_correlation_heatmap.pdf"))
+        plt.close()
+
+    def plot_dendrogram(self, linkage_matrix: np.ndarray, labels: list,
+                        leaf_font_size: int = 10, orientation: str = "left",
+                        show_inline: bool = False) -> None:
+        """
+        Plot a dendrogram using a provided linkage matrix and labels.
+        
+        Parameters
+        ----------
+        linkage_matrix : np.ndarray
+            Linkage matrix (of float type).
+        labels : list
+            Labels for the leaves.
+        leaf_font_size : int, optional
+            Font size for the leaf labels.
+        orientation : str, optional
+            Orientation of the dendrogram.
+        show_inline : bool, optional
+            Whether to display the plot inline.
+        """
+        plt.figure(figsize=(14, 10))
+        dendrogram(linkage_matrix, orientation=orientation, labels=labels,
+                   leaf_font_size=leaf_font_size, color_threshold=0,
+                   link_color_func=lambda k: "black")
+        plt.xlabel("Distance")
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, "dendrogram.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_differential_barplot(self, diff_df: pd.DataFrame, indices_to_label: list,
+                                  ylabel: str = "Mean susceptibility", show_inline: bool = False) -> None:
+        """
+        Plot a sorted barplot for differential lipids colored by their class.
+        
+        Parameters
+        ----------
+        diff_df : pd.DataFrame
+            DataFrame of differential values with index as lipid names and a 'color' column.
+        indices_to_label : list
+            List of positions to annotate.
+        ylabel : str, optional
+            Y-axis label.
+        show_inline : bool, optional
+            Whether to display inline.
+        """
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(range(len(diff_df)), diff_df.iloc[:, 0], color=diff_df["color"])
+        texts = []
+        for idx in indices_to_label:
+            x = idx
+            y = diff_df.iloc[idx, 0]
+            label = diff_df.index[idx]
+            texts.append(plt.text(x, y, label, ha="center", va="bottom"))
+        adjust_text(texts, arrowprops=dict(arrowstyle="->", color="gray", lw=0.5),
+                    expand_points=(1.5, 1.5))
+        plt.gca().spines["top"].set_visible(False)
+        plt.gca().spines["right"].set_visible(False)
+        plt.ylabel(ylabel)
+        plt.xticks([])
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, "differential_barplot.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
+    # Placeholders for Plotly-based rendering, clock visualization, and movie generation.
+    def plot_3d_rendering_plotly(self):
+        """Placeholder for 3D rendering using Plotly."""
+        print("plot_3d_rendering_plotly not implemented yet.")
+
+    def plot_2d_rendering_plotly(self):
+        """Placeholder for 2D rendering using Plotly with zoomability."""
+        print("plot_2d_rendering_plotly not implemented yet.")
+
+    def plot_treemap(self):
+        """Placeholder for lipizones interactive treemap."""
+        print("plot_treemap not implemented yet.")
+
+    def plot_clock(self):
+        """Placeholder for visualizing a clock."""
+        print("plot_clock not implemented yet.")
+
+    def make_movie(self):
+        """Placeholder for making a movie from the data."""
+        print("make_movie not implemented yet.")
