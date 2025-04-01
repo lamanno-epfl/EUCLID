@@ -103,14 +103,13 @@ def normalize_to_255(a):
         a = a.astype(np.uint8)
     return a
 
-
 class Postprocessing:
     """
     Postprocessing class for EUCLID.
     
     Operates on the AnnData object (and related data) produced by the embedding pipeline.
     """
-    def __init__(self, adata, embeddings, morans, alldata, pixels, coordinates,
+    def __init__(self, adata, embeddings, morans, alldata, pixels, 
                  reference_image=None, annotation_image=None):
         """
         Parameters
@@ -137,7 +136,7 @@ class Postprocessing:
         self.morans = morans
         self.alldata = alldata
         self.pixels = pixels
-        self.coordinates = coordinates
+        self.coordinates = self.pixels[['SectionID', 'x', 'y']]
         self.reference_image = reference_image
         self.annotation_image = annotation_image
 
@@ -149,10 +148,10 @@ class Postprocessing:
     def xgboost_feature_restoration(
         self,
         moran_threshold=0.4,
-        usage_ncolumns=70,
         usage_threshold=0.4,
         usage_top_n=3,
         usage_sum_threshold=2,
+        acquisitions=None,
         min_sections_for_training=3,
         train_section_indices=(0, 2),
         val_section_index=1,
@@ -195,8 +194,6 @@ class Postprocessing:
                 - self.coordinates: pd.DataFrame with coordinate and 'SectionID' information per pixel.
         moran_threshold : float, default=0.4
             The Moran’s I threshold used to decide which features (lipids) are initially restorable.
-        usage_ncolumns : int, default=70
-            How many columns from `self.morans` to consider when constructing the usage matrix.
         usage_threshold : float, default=0.4
             Threshold passed to `top_3_above_threshold` to decide if a value is "good" for usage.
         usage_top_n : int, default=3
@@ -220,10 +217,12 @@ class Postprocessing:
     
         Returns
         -------
-        pd.DataFrame
-            A DataFrame of predicted values per retained lipid (columns) for each pixel (rows).
+        anndata.AnnData
+            Updated main AnnData object with the restored lipids added in .obsm.
         """
         os.makedirs(output_model_dir, exist_ok=True)
+
+        self.embeddings = pd.DataFrame(self.embeddings, index=self.pixels.index)
     
         # 1) Determine which features (lipids) are restorable based on Moran’s I threshold
         isitrestorable = (self.morans > moran_threshold).sum(axis=1).sort_values()
@@ -234,11 +233,15 @@ class Postprocessing:
         self.alldata.columns = cols
     
         # Subset the lipids to restore
-        lipids_to_restore = self.alldata.loc[:, torestore.astype(float).astype(str)]
-    
-        # Prepare usage dataframe from morans (here we use first `usage_ncolumns` columns)
-        usage_dataframe = self.morans.iloc[:, :usage_ncolumns].copy()
-    
+        lipids_to_restore = self.alldata.loc[:, self.alldata.columns.isin(torestore.astype(float).astype(str))]
+
+        if acquisitions is not None:
+            usage_columns = acquisitions['acqn'].values.astype(str)
+            usage_dataframe = self.morans.loc[:, usage_columns].copy()
+        else:
+            usage_dataframe = self.morans.copy()
+        usage_dataframe.columns = self.pixels['SectionID'].unique()################# 
+        
         # Define helper: choose top `usage_top_n` above `usage_threshold` per row
         def top_n_above_threshold(row, threshold=usage_threshold, top_n=usage_top_n):
             above_mask = row >= threshold
@@ -258,8 +261,8 @@ class Postprocessing:
         usage_dataframe = usage_dataframe.loc[usage_dataframe.sum(axis=1) > usage_sum_threshold, :]
     
         # Select corresponding lipids to restore
-        lipids_to_restore = lipids_to_restore.loc[:, usage_dataframe.index.astype(float).astype(str)]
-        lipids_to_restore["SectionID"] = self.alldata["SectionID"]
+        lipids_to_restore = lipids_to_restore.loc[:, lipids_to_restore.columns.isin(usage_dataframe.index.astype(float).astype(str))]
+        lipids_to_restore["SectionID"] = self.pixels["SectionID"]
     
         # Coordinates
         coords = self.coordinates.copy()
@@ -283,11 +286,11 @@ class Postprocessing:
                 continue
     
             # Gather train data
-            train_data = self.embeddings.loc[coords["SectionID"].isin(train_sections), :]
+            train_data = self.embeddings.loc[coords["SectionID"].astype(int).isin(train_sections), :]
             y_train = lipids_to_restore.loc[train_data.index, str(index)]
-    
+        
             # Gather val data
-            val_data = self.embeddings.loc[coords["SectionID"] == val_section, :]
+            val_data = self.embeddings.loc[coords["SectionID"].astype(int).isin([val_section]), :] #################
             y_val = lipids_to_restore.loc[val_data.index, str(index)]
     
             # 4) Train XGBoost model
@@ -331,7 +334,6 @@ class Postprocessing:
         # Rename new columns: remove "_xgb_model.joblib"
         new_cols = []
         for i, col in enumerate(coords_pred.columns):
-            # First few columns in coords are presumably x, y, SectionID, etc., so keep them
             if i < len(self.coordinates.columns):
                 new_cols.append(col)
             else:
@@ -342,11 +344,10 @@ class Postprocessing:
         metrics_df.to_csv(metrics_csv)
         valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index.astype(float).astype(str)
         coords_pred = coords_pred.loc[:, list(coords_pred.columns[:len(self.coordinates.columns)]) + list(valid_features)]
-    
-        # For demonstration, saving to disk as HDF5 (optional)
-        coords_pred.to_hdf("xgboost_recovered_lipids.h5ad", key="table")
-    
-        return coords_pred
+
+        adatafs.obsm['X_restored'] = coords_pred.iloc[:, 3:].values ################################
+        
+        return adatafs
 
 
     # -------------------------------------------------------------------------
@@ -414,13 +415,13 @@ class Postprocessing:
         """
         Placeholder for training a variational autoencoder to extract lipid programs.
         """
-        print("train_lipimap is not implemented yet.")
+        print("train_lipimap wrapper is not implemented yet.")
         return None
 
     # -------------------------------------------------------------------------
     # BLOCK 4: Add Modality
     # -------------------------------------------------------------------------
-    def add_modality(self, modality_adata, modality_name, modality_type="continuous"):
+    def add_modality(self, modality_adata, modality_name):
         """
         Register another omic modality onto the main AnnData object.
         
@@ -430,8 +431,6 @@ class Postprocessing:
             The AnnData object for the new modality.
         modality_name : str
             Name to assign to this modality.
-        modality_type : str, optional
-            Either "continuous" or "categorical".
         
         Returns
         -------
@@ -442,7 +441,6 @@ class Postprocessing:
         common_idx = self.adata.obs_names.intersection(modality_adata.obs_names)
         modality_data = modality_adata[common_idx].X
         self.adata.obsm[modality_name] = modality_data
-        self.adata.uns[f"{modality_name}_type"] = modality_type
         return self.adata
 
     # -------------------------------------------------------------------------
