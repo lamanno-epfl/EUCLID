@@ -26,7 +26,7 @@ import pandas as pd
 import anndata
 import scanpy as sc
 import squidpy as sq
-import backSPIN
+from . import backSPIN
 import leidenalg
 import networkx as nx
 import igraph as ig
@@ -47,6 +47,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import resample
 
 from xgboost import XGBClassifier
+import xgboost as xgb
 from imblearn.under_sampling import RandomUnderSampler
 
 from scipy.cluster.hierarchy import linkage, fcluster
@@ -105,17 +106,17 @@ class Clustering:
     metadata : pd.DataFrame, optional
         Additional metadata (e.g., used for merging spatial metadata).
     """
-    def __init__(self, adata, coordinates, reconstructed_data_df, standardized_embeddings_GLOBAL, metadata=None):
+    def __init__(self, adata, coordinates, standardized_embeddings_GLOBAL, metadata):
         self.adata = adata
         self.coordinates = coordinates
-        self.reconstructed_data_df = reconstructed_data_df
+        self.reconstructed_data_df = adata.obsm['X_approximated']
         self.standardized_embeddings_GLOBAL = standardized_embeddings_GLOBAL
         self.metadata = metadata
 
     # -------------------------------------------------------------------------
     # BLOCK 1: Conventional Leiden clustering on harmonized NMF embeddings
     # -------------------------------------------------------------------------
-    def leiden_nmf(self, use_reference_only=True, resolution=1.0, key_added="leiden_nmf"):
+    def leiden_nmf(self, use_reference_only=True, resolution=1.0, key_added="X_Leiden"):
         """
         Perform conventional Leiden clustering on the harmonized NMF embeddings.
         
@@ -133,23 +134,29 @@ class Clustering:
         sc.AnnData
             The AnnData object with the added clustering result.
         """
-        # Here we assume that the harmonized NMF embeddings are stored in adata.obsm['X_NMF_harmonized']
-        if "X_NMF_harmonized" not in self.adata.obsm:
-            raise ValueError("Harmonized NMF embeddings not found in adata.obsm['X_NMF_harmonized']")
-        sc.pp.neighbors(self.adata, use_rep="X_NMF_harmonized")
+        try:
+            sc.pp.neighbors(self.adata, use_rep="X_Harmonized")
+        except:
+            sc.pp.neighbors(self.adata, use_rep="X_NMF")
         sc.tl.leiden(self.adata, resolution=resolution, key_added=key_added)
         return self.adata
 
     # -------------------------------------------------------------------------
     # Utility functions (internal)
     # -------------------------------------------------------------------------
-    def _compute_seeded_NMF(self, data):
+    def _compute_seeded_NMF(self, data, gamma_min=0.8, gamma_max=1.5, gamma_num=100):
         """
         Private method to compute seeded NMF (as in embedding) on the given data.
         Parameters
         ----------
         data : pd.DataFrame
             DataFrame of pixels x lipids.
+        gamma_min : float, optional
+            Minimum gamma value for Leiden resolution search. (Default is 0.8)
+        gamma_max : float, optional
+            Maximum gamma value for Leiden resolution search. (Default is 1.5)
+        gamma_num : int, optional
+            Number of gamma values to try. (Default is 100)
         Returns
         -------
         nmfdf : pd.DataFrame
@@ -174,7 +181,7 @@ class Clustering:
             'params': {'n_neighbors': 10, 'method': 'custom'}
         }
         G = nx.from_numpy_array(corr_matrix)
-        gamma_values = np.linspace(0.8, 1.5, num=100)
+        gamma_values = np.linspace(gamma_min, gamma_max, num=gamma_num) 
         num_communities = []
         modularity_scores = []
         objective_values = []
@@ -223,39 +230,49 @@ class Clustering:
         factor_to_lipid = nmf.components_
         return nmfdf, factor_to_lipid, N_factors, nmf
 
-    def _continuity_check(self, spat, vcnorm):
+    def _continuity_check(self, spat, spat_columns=['zccf','yccf','Section'], 
+                           min_val_threshold=10, min_nonzero_sections=3, gaussian_sigma=1.8, default_peak_ratio=10): 
         """
         Check whether clusters are continuous along the AP axis.
         Parameters
         ----------
-        spat : np.array or DataFrame with columns ['zccf','yccf','Section']
-        vcnorm : pd.Series
-            Normalization factors per Section.
+        spat : np.array or DataFrame
+            Array or DataFrame with spatial coordinates.
+        spat_columns : list, optional
+            List of column names to use for the spatial coordinates. (Default is ['zccf','yccf','Section'])
+        min_val_threshold : int, optional
+            Minimum value threshold to consider a section count significant. (Default is 10)
+        min_nonzero_sections : int, optional
+            Minimum number of sections with nonzero counts required. (Default is 3)
+        gaussian_sigma : float, optional
+            Sigma value for Gaussian smoothing. (Default is 1.8)
+        default_peak_ratio : float, optional
+            Default peak ratio if insufficient peaks are found. (Default is 10)
         Returns
         -------
         Tuple of continuity flags and peak info.
         """
-        # (Using code from your snippet)
-        dd2 = pd.DataFrame(spat, columns=['zccf','yccf','Section'])
-        # Convert section to int
+        dd2 = pd.DataFrame(spat, columns=spat_columns)
         dd2['Section'] = dd2['Section'].astype(int)
+        vcnorm = dd2['Section'].astype(int).value_counts()
+        vcnorm.index = vcnorm.index.astype(int)
+        vcnorm = vcnorm.sort_index()
         enough_sectionss = []
         number_of_peakss = []
         peak_ratios = []
-        # For each unique cluster color we expect two values. In this helper, we return the values for first two clusters.
-        # (In practice you might want to loop over clusters.)
+        # For each unique cluster color we expect two values
         for cluster in [0, 1]:
             test = dd2  # assuming test is subset for a given cluster
             value_counts = test['Section'].value_counts().sort_index()
             ap = value_counts.values.copy()
-            ap[ap < 10] = 0
-            ap_nonnull = np.sum(ap > 0) > 3
+            ap[ap < min_val_threshold] = 0
+            ap_nonnull = np.sum(ap > 0) > min_nonzero_sections
             apflag = any(ap[i] != 0 and ap[i+1] != 0 for i in range(len(ap)-1))
             enough_sections = ap_nonnull and apflag
             ap_norm = value_counts / vcnorm.loc[value_counts.index].values
             ap_norm = np.array(ap_norm)
             zero_padded_ap = np.pad(ap_norm, pad_width=1, mode='constant', constant_values=0)
-            smoothed_ap = gaussian_filter1d(zero_padded_ap, sigma=1.8)
+            smoothed_ap = gaussian_filter1d(zero_padded_ap, sigma=gaussian_sigma)
             peaks, properties = find_peaks(smoothed_ap, height=0)
             number_of_peaks = len(peaks)
             if number_of_peaks > 1:
@@ -263,7 +280,7 @@ class Clustering:
                 top_peaks = np.sort(peak_heights)[-2:]
                 peak_ratio = top_peaks[1] / top_peaks[0]
             else:
-                peak_ratio = 10
+                peak_ratio = default_peak_ratio
             enough_sectionss.append(enough_sections)
             number_of_peakss.append(number_of_peaks)
             peak_ratios.append(peak_ratio)
@@ -375,7 +392,24 @@ class Clustering:
                                 penalty2=2,
                                 ACCTHR=0.6,
                                 max_depth=15,
-                                ds_factor=1):
+                                ds_factor=1,
+                                spat_columns=['zccf','yccf','Section'],
+                                min_val_threshold=10,
+                                min_nonzero_sections=3,
+                                gaussian_sigma=1.8, 
+                                default_peak_ratio=10, 
+                                peak_count_threshold=3, 
+                                peak_ratio_threshold=1.4, 
+                                xgb_n_estimators=1000,
+                                xgb_max_depth=8, 
+                                xgb_learning_rate=0.02,  
+                                xgb_subsample=0.8, 
+                                xgb_colsample_bytree=0.8, 
+                                xgb_gamma=0.5,
+                                xgb_random_state=42,
+                                xgb_n_jobs=6, 
+                                early_stopping_rounds=7 
+                                ):
         """
         Learn a hierarchical bipartite clustering tree on the dataset.
         This is a self-supervised clustering method that recursively splits the dataset,
@@ -406,6 +440,38 @@ class Clustering:
             Maximum recursive depth.
         ds_factor : int
             Downsampling factor.
+        spat_columns : list, optional  ##EDITED
+            List of column names for spatial coordinates. (Default is ['zccf','yccf','Section'])
+        min_val_threshold : int, optional  ##EDITED
+            Minimum value threshold for continuity check. (Default is 10)
+        min_nonzero_sections : int, optional  ##EDITED
+            Minimum nonzero sections for continuity check. (Default is 3)
+        gaussian_sigma : float, optional  ##EDITED
+            Sigma for Gaussian smoothing in continuity check. (Default is 1.8)
+        default_peak_ratio : float, optional  ##EDITED
+            Default peak ratio in continuity check. (Default is 10)
+        peak_count_threshold : int, optional  ##EDITED
+            Threshold for the number of peaks in continuity check. (Default is 3)
+        peak_ratio_threshold : float, optional  ##EDITED
+            Threshold for the peak ratio in continuity check. (Default is 1.4)
+        xgb_n_estimators : int, optional  ##EDITED
+            Number of estimators for XGBClassifier. (Default is 1000)
+        xgb_max_depth : int, optional  ##EDITED
+            Maximum tree depth for XGBClassifier. (Default is 8)
+        xgb_learning_rate : float, optional  ##EDITED
+            Learning rate for XGBClassifier. (Default is 0.02)
+        xgb_subsample : float, optional  ##EDITED
+            Subsample ratio for XGBClassifier. (Default is 0.8)
+        xgb_colsample_bytree : float, optional  ##EDITED
+            Column sample by tree for XGBClassifier. (Default is 0.8)
+        xgb_gamma : float, optional  ##EDITED
+            Gamma for XGBClassifier. (Default is 0.5)
+        xgb_random_state : int, optional  ##EDITED
+            Random state for XGBClassifier. (Default is 42)
+        xgb_n_jobs : int, optional  ##EDITED
+            Number of jobs for XGBClassifier. (Default is 6)
+        early_stopping_rounds : int, optional  ##EDITED
+            Early stopping rounds for XGBClassifier fit. (Default is 7)
         
         Returns
         -------
@@ -414,13 +480,15 @@ class Clustering:
         clusteringLOG : pd.DataFrame
             A DataFrame recording the split history.
         """
-        # For brevity, we assume that the following variables are available from embedding:
-        # - data: the reconstructed dataset (self.reconstructed_data_df)
-        # - standardized_embeddings_GLOBAL: self.standardized_embeddings_GLOBAL
-        # - coordinates: self.coordinates
-        # We also assume that a global variable “trainpoints”, “valpoints”, “testpoints” are defined based on coordinates.
-        # In a real implementation, these would be passed or computed.
-        data = self.reconstructed_data_df.copy()
+        valsec = (self.coordinates['Section'].unique()[::5] + 2)[:-1] ###################################
+        testsec = (self.coordinates['Section'].unique()[::5] + 1)[:-1]
+        trainsec = np.setdiff1d(np.setdiff1d(self.coordinates['Section'].unique(), testsec), valsec)
+        
+        valpoints = self.coordinates.loc[self.coordinates['Section'].isin(valsec),:].index
+        testpoints = self.coordinates.loc[self.coordinates['Section'].isin(testsec),:].index
+        trainpoints = self.coordinates.loc[self.coordinates['Section'].isin(trainsec),:].index
+
+        data = pd.DataFrame(self.reconstructed_data_df.copy(), index = self.standardized_embeddings_GLOBAL.index)
         # Create a copy of the raw data (for differential testing)
         rawlips = data.copy()
         # Normalize raw data using percentiles (2% and 98%)
@@ -434,9 +502,6 @@ class Clustering:
         # Here we assume self.coordinates has columns ['zccf','yccf','Section']
         adata.obsm['spatial'] = self.coordinates[['zccf','yccf','Section']].loc[data.index].values
         adata.obsm['lipids'] = normalized_datemp
-        
-        # Get global standardized embeddings (assumed computed previously)
-        # WARNINGLINE global self_standardized = self.standardized_embeddings_GLOBAL.copy()
         
         # Initialize a log DataFrame for clustering history.
         column_names = [f"level_{i}" for i in range(1, max_depth+1)]
@@ -464,6 +529,10 @@ class Clustering:
             multiplets = self._generate_combinations(len(goodpcs))
             flag = False
             aaa = 0
+
+            #########################################################
+
+            
             while (not flag) and (aaa < len(multiplets)):
                 bestpcs = multiplets[aaa]
                 embeddings_local = top_pcs_data[:, bestpcs]
@@ -488,16 +557,22 @@ class Clustering:
                 gr2 = np.array(centroids.columns)[gr2]
                 data_for_clustering['lab'] = 1
                 data_for_clustering.loc[data_for_clustering['label'].isin(gr2), 'lab'] = 2
+                
                 # Check continuity along AP axis using self.coordinates and differential lipids in adata.obsm['lipids']
-                # For simplicity, assume we have a normalization factor vcnorm from self.coordinates.
-                vcnorm = self.coordinates.loc[current_adata.obs_names, 'Section'].value_counts().sort_index()
-                enough_sections0, enough_sections1, num_peaks0, num_peaks1, peak_ratio0, peak_ratio1 = self._continuity_check(current_adata.obsm['spatial'], vcnorm)
+                enough_sections0, enough_sections1, num_peaks0, num_peaks1, peak_ratio0, peak_ratio1 = self._continuity_check(
+                    current_adata.obsm['spatial'], 
+                    spat_columns=spat_columns, 
+                    min_val_threshold=min_val_threshold,
+                    min_nonzero_sections=min_nonzero_sections, 
+                    gaussian_sigma=gaussian_sigma, 
+                    default_peak_ratio=default_peak_ratio 
+                )
                 alteredlips, promoted = self._differential_lipids(current_adata.obsm['lipids'].values, kmeans_labels, min_fc, pthr)
                 flag = ((np.sum(kmeans_labels == 1) > min_voxels or np.sum(kmeans_labels == 0) > min_voxels)
                         and (alteredlips > min_diff_lipids)
                         and enough_sections0 and enough_sections1
-                        and ((num_peaks0 < 3) or (peak_ratio0 > 1.4))
-                        and ((num_peaks1 < 3) or (peak_ratio1 > 1.4)))
+                        and ((num_peaks0 < peak_count_threshold) or (peak_ratio0 > peak_ratio_threshold)) 
+                        and ((num_peaks1 < peak_count_threshold) or (peak_ratio1 > peak_ratio_threshold)))
                 aaa += 1
                 kmeans_labels = data_for_clustering['lab'].astype(int)
             if not flag:
@@ -505,32 +580,35 @@ class Clustering:
                 return None
             # Train an XGB classifier on the embeddings
             embeddings_df = pd.DataFrame(embspace, index=current_adata.obs_names)
-            # Here we assume train/val/test splits are defined from self.coordinates (dummy example below)
-            all_idx = embeddings_df.index
-            train_idx = all_idx[:int(0.6*len(all_idx))]
-            val_idx = all_idx[int(0.6*len(all_idx)):int(0.8*len(all_idx))]
-            test_idx = all_idx[int(0.8*len(all_idx)):]
-            y_train = kmeans_labels[train_idx]
-            y_val = kmeans_labels[val_idx]
-            y_test = kmeans_labels[test_idx]
-            X_train = embeddings_df.loc[train_idx]
-            X_val = embeddings_df.loc[val_idx]
-            X_test = embeddings_df.loc[test_idx]
+            
+            X_train = embeddings_df.loc[embeddings_df.index.isin(trainpoints), :]
+            X_val = embeddings_df.loc[embeddings_df.index.isin(valpoints), :]
+            X_test = embeddings_df.loc[embeddings_df.index.isin(testpoints), :]
+            
+            kmeans_labels = kmeans_labels -1
+            y_train = kmeans_labels.loc[X_train.index]
+            y_val = kmeans_labels.loc[X_val.index]
+            y_test = kmeans_labels.loc[X_test.index]
+            
             X_train_sub, y_train_sub = self._undersample(X_train, y_train)
-            xgb_model = XGBClassifier(
-                n_estimators=1000,
-                max_depth=8,
-                learning_rate=0.02,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                gamma=0.5,
-                random_state=42,
-                n_jobs=6
+            
+            xgb_model = XGBClassifier(  
+                n_estimators=xgb_n_estimators, 
+                max_depth=xgb_max_depth, 
+                learning_rate=xgb_learning_rate,
+                subsample=xgb_subsample, 
+                colsample_bytree=xgb_colsample_bytree, 
+                gamma=xgb_gamma, 
+                random_state=xgb_random_state,  
+                n_jobs=xgb_n_jobs  
             )
-            xgb_model.fit(X_train_sub, y_train_sub,
-                          eval_set=[(X_val, y_val)],
-                          early_stopping_rounds=7,
-                          verbose=False)
+            xgb_model.fit(
+                X_train_sub,
+                y_train_sub,
+                eval_set=[(X_val, y_val)],
+                #callbacks=[xgb.callback.EarlyStopping(rounds=early_stopping_rounds)],  #### CURRENTLY FROZEN DUE TO PACKAGE INCOMPATIBILITIES THAT ARE NON TRIVIAL TO FIX.
+                verbose=False
+            )
             test_pred = xgb_model.predict(X_test)
             test_acc = accuracy_score(y_test, test_pred)
             print(f"Test accuracy: {test_acc}")
@@ -567,8 +645,8 @@ class Clustering:
         
         root_node = _dosplit(adata[::ds_factor], self.standardized_embeddings_GLOBAL[::ds_factor].values, path=[], splitlevel=0)
         # Save the clustering log and tree to file.
-        clusteringLOG.to_hdf("tree_clustering_down_clean.h5ad", key="table")
-        with open("rootnode_clustering_whole_clean.pkl", "wb") as f:
+        clusteringLOG.to_parquet("tree_clustering.parquet")
+        with open("rootnode_clustering.pkl", "wb") as f:
             pickle.dump(root_node, f)
         return root_node, clusteringLOG
 
@@ -593,10 +671,10 @@ class Clustering:
         lipizone_colors : pd.Series
             A Series mapping each observation to a hex color.
         """
-        # In our refactored version, we assume that “tree” is available (e.g. from the clustering history)
+        # In our refactored version, we assume that "tree" is available (e.g. from the clustering history)
         # We use the plotting utilities from the snippet.
         # (For brevity, much of the detailed plotting code is preserved.)
-        # Here we simulate the existence of a “contour” array, e.g. eroded annotation.
+        # Here we simulate the existence of a "contour" array, e.g. eroded annotation.
         conto = np.load("eroded_annot.npy")
         coords = coordinates.fillna(0).replace([np.inf, -np.inf], 0)
         xs = (coords['xccf']*40).astype(int)
