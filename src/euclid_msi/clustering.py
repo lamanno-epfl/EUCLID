@@ -480,84 +480,182 @@ class Clustering:
         clusteringLOG : pd.DataFrame
             A DataFrame recording the split history.
         """
-        valsec = (self.coordinates['Section'].unique()[::5] + 2)[:-1] ###################################
-        testsec = (self.coordinates['Section'].unique()[::5] + 1)[:-1]
-        trainsec = np.setdiff1d(np.setdiff1d(self.coordinates['Section'].unique(), testsec), valsec)
+        # Get unique sections
+        unique_sections = self.coordinates['Section'].unique()
+        print("Unique sections:", unique_sections)
+        num_sections = len(unique_sections)
         
-        valpoints = self.coordinates.loc[self.coordinates['Section'].isin(valsec),:].index
-        testpoints = self.coordinates.loc[self.coordinates['Section'].isin(testsec),:].index
-        trainpoints = self.coordinates.loc[self.coordinates['Section'].isin(trainsec),:].index
-
-        data = pd.DataFrame(self.reconstructed_data_df.copy(), index = self.standardized_embeddings_GLOBAL.index)
-        # Create a copy of the raw data (for differential testing)
+        # Check if we have enough sections for the original splitting approach
+        if num_sections >= 3:
+            # Initialize empty arrays
+            valsec = np.array([], dtype=int)
+            testsec = np.array([], dtype=int)
+            
+            # Apply the proportional rule, but ensure at least one section in each split
+            if num_sections >= 5:
+                valsec = (unique_sections[::5] + 2)[:-1]
+                testsec = (unique_sections[::5] + 1)[:-1]
+            else:
+                # For fewer sections but still >=3, assign at least one to each group
+                valsec = np.array([unique_sections[0]])
+                testsec = np.array([unique_sections[1]])
+            
+            # Double check that validation and test sections are not empty
+            if len(valsec) == 0:
+                valsec = np.array([unique_sections[0]])
+            if len(testsec) == 0:
+                # Avoid overlap with validation
+                for sec in unique_sections:
+                    if sec not in valsec:
+                        testsec = np.array([sec])
+                        break
+            
+            # The rest go to training
+            trainsec = np.setdiff1d(np.setdiff1d(unique_sections, testsec), valsec)
+            if len(trainsec) == 0:
+                if len(valsec) > len(testsec):
+                    trainsec = np.array([valsec[-1]])
+                    valsec = valsec[:-1]
+                else:
+                    trainsec = np.array([testsec[-1]])
+                    testsec = testsec[:-1]
+            
+            print("Validation sections (valsec):", valsec)
+            print("Test sections (testsec):", testsec)
+            print("Train sections (trainsec):", trainsec)
+            
+            # Identify point indices for each group
+            valpoints = self.coordinates.loc[self.coordinates['Section'].isin(valsec),:].index
+            testpoints = self.coordinates.loc[self.coordinates['Section'].isin(testsec),:].index
+            trainpoints = self.coordinates.loc[self.coordinates['Section'].isin(trainsec),:].index
+            
+        else:
+            # Classic 60-20-20 split on the rows (ignoring sections)
+            print("Less than 3 unique sections found. Using 60-20-20 split on rows.")
+            
+            # Shuffle indices to ensure random selection
+            all_indices = self.coordinates.index.values
+            np.random.shuffle(all_indices)
+            
+            # Calculate split sizes
+            n_samples = len(all_indices)
+            n_train = int(0.6 * n_samples)
+            n_val = int(0.2 * n_samples)
+            
+            # Split indices
+            trainpoints = all_indices[:n_train]
+            valpoints = all_indices[n_train:n_train+n_val]
+            testpoints = all_indices[n_train+n_val:]
+            
+            # For consistency with the section-based approach
+            trainsec = np.array([])
+            valsec = np.array([])
+            testsec = np.array([])
+        
+        # Prepare data for clustering
+        data = pd.DataFrame(self.reconstructed_data_df.copy(), index=self.standardized_embeddings_GLOBAL.index)
+        print("Data shape:", data.shape)
         rawlips = data.copy()
+        print("Raw lipids data shape:", rawlips.shape)
+        
         # Normalize raw data using percentiles (2% and 98%)
         p2 = rawlips.quantile(0.02)
         p98 = rawlips.quantile(0.98)
+        print("2nd percentile values:\n", p2)
+        print("98th percentile values:\n", p98)
         normalized_values = (rawlips.values - p2.values) / (p98.values - p2.values)
+        print("Normalized values shape:", normalized_values.shape)
         clipped_values = np.clip(normalized_values, 0, 1)
         normalized_datemp = pd.DataFrame(clipped_values, columns=rawlips.columns, index=rawlips.index)
+        print("Normalized and clipped data shape:", normalized_datemp.shape)
+        
         # Prepare a Scanpy object with raw lipids for differential testing.
         adata = sc.AnnData(X=data)
-        # Here we assume self.coordinates has columns ['zccf','yccf','Section']
         adata.obsm['spatial'] = self.coordinates[['zccf','yccf','Section']].loc[data.index].values
         adata.obsm['lipids'] = normalized_datemp
+        print("Created AnnData with shape:", adata.shape)
+        print("Sample spatial coordinates:\n", adata.obsm['spatial'][:5])
+        print("Sample lipid data:\n", normalized_datemp.iloc[:5])
         
         # Initialize a log DataFrame for clustering history.
         column_names = [f"level_{i}" for i in range(1, max_depth+1)]
         clusteringLOG = pd.DataFrame(0, index=data.index, columns=column_names)[::ds_factor]
+        print("Initialized clustering log with shape:", clusteringLOG.shape)
         
         # Define the recursive splitting function.
         def _dosplit(current_adata, embds, path=[], splitlevel=0):
-            print("Splitting level:", splitlevel)
+            print("\n=== Entering _dosplit at level:", splitlevel, "with", current_adata.X.shape[0], "voxels ===")
             if current_adata.X.shape[0] < min_voxels:
-                print("Branch exhausted due to low voxel count.")
+                print("Branch exhausted due to low voxel count:", current_adata.X.shape[0])
                 return None
+        
             # Compute a local NMF on current data
             nmfdf, loadings, N_factors, nmf_model = self._compute_seeded_NMF(pd.DataFrame(current_adata.X, index=current_adata.obs_names))
             nmf_result = nmfdf.values
+            print("Computed NMF. nmfdf shape:", nmfdf.shape, "N_factors:", N_factors)
+            print("Loadings shape:", loadings.shape)
+            print("Mean absolute values per factor:", np.abs(nmf_result).mean(axis=0))
+            
             filter1 = np.abs(nmf_result).mean(axis=0) > thr_signal
             loadings_sel = loadings[filter1, :]
             nmf_result = nmf_result[:, filter1]
             original_nmf_indices = np.arange(N_factors)[filter1]
+            print("Selected", filter1.sum(), "factors after filtering out of", len(filter1))
+            print("Shape of filtered nmf_result:", nmf_result.shape)
+            
             tempadata = sc.AnnData(X=nmf_result)
             tempadata.obsm['spatial'] = current_adata.obsm['spatial']
+            
+            # Rank features by combined score
             goodpcs = self._rank_features_by_combined_score(tempadata)
+            print("Ranked features (goodpcs):", goodpcs)
             goodpcs_indices = original_nmf_indices[goodpcs.astype(int)]
             top_pcs_data = nmf_result[:, goodpcs.astype(int)]
             loadings_sel = loadings_sel[goodpcs.astype(int), :]
+            print("Top PCs data shape:", top_pcs_data.shape)
+            print("Indices of good principal components:", goodpcs_indices)
+            
             multiplets = self._generate_combinations(len(goodpcs))
+            print("Generated multiplets count:", len(multiplets))
             flag = False
             aaa = 0
-
-            #########################################################
-
-            
+        
+            # Begin iterative search for acceptable split
             while (not flag) and (aaa < len(multiplets)):
                 bestpcs = multiplets[aaa]
+                print("\nIteration", aaa, "using bestpcs indices:", bestpcs)
                 embeddings_local = top_pcs_data[:, bestpcs]
                 loadings_current = loadings_sel[list(bestpcs), :]
                 selected_nmf_indices = goodpcs_indices[list(bestpcs)]
                 scaler_local = StandardScaler()
                 standardized_embeddings = scaler_local.fit_transform(embeddings_local)
+                print("Standardized embeddings shape:", standardized_embeddings.shape)
+                
                 # Combine with previous split and global embeddings
                 globembds = self.standardized_embeddings_GLOBAL.loc[current_adata.obs_names].values / penalty2
                 embspace = np.concatenate((standardized_embeddings, embds/penalty1, globembds), axis=1)
+                print("Combined embedding space shape:", embspace.shape)
+                
                 kmeans = KMeans(n_clusters=K, random_state=230598)
                 kmeans_labels = kmeans.fit_predict(embspace)
+                print("KMeans labels distribution:", np.bincount(kmeans_labels))
+                
                 # Reaggregate via backSPIN (using its API)
                 data_for_clustering = pd.DataFrame(current_adata.X, index=current_adata.obs_names, columns=current_adata.var_names)
                 data_for_clustering['label'] = kmeans_labels
                 centroids = data_for_clustering.groupby('label').mean()
                 centroids = pd.DataFrame(StandardScaler().fit_transform(centroids), columns=centroids.columns, index=centroids.index).T
+                print("Centroids shape after standardization and transpose:", centroids.shape)
                 row_ix, columns_ix = backSPIN.SPIN(centroids, widlist=4)
                 centroids = centroids.iloc[row_ix, columns_ix]
+                print("Centroids shape after backSPIN reordering:", centroids.shape)
                 _, _, _, gr1, gr2, _, _, _, _ = backSPIN._divide_to_2and_resort(sorted_data=centroids.values, wid=5)
                 gr1 = np.array(centroids.columns)[gr1]
                 gr2 = np.array(centroids.columns)[gr2]
+                print("Division groups sizes: gr1 =", len(gr1), "gr2 =", len(gr2))
                 data_for_clustering['lab'] = 1
                 data_for_clustering.loc[data_for_clustering['label'].isin(gr2), 'lab'] = 2
-                
+        
                 # Check continuity along AP axis using self.coordinates and differential lipids in adata.obsm['lipids']
                 enough_sections0, enough_sections1, num_peaks0, num_peaks1, peak_ratio0, peak_ratio1 = self._continuity_check(
                     current_adata.obsm['spatial'], 
@@ -567,31 +665,56 @@ class Clustering:
                     gaussian_sigma=gaussian_sigma, 
                     default_peak_ratio=default_peak_ratio 
                 )
+                print("Continuity check results:",
+                      "enough_sections0 =", enough_sections0,
+                      "enough_sections1 =", enough_sections1,
+                      "num_peaks0 =", num_peaks0,
+                      "num_peaks1 =", num_peaks1,
+                      "peak_ratio0 =", peak_ratio0,
+                      "peak_ratio1 =", peak_ratio1)
+                
                 alteredlips, promoted = self._differential_lipids(current_adata.obsm['lipids'].values, kmeans_labels, min_fc, pthr)
+                print("Differential lipids count:", alteredlips, "Promoted:", promoted)
+                
                 flag = ((np.sum(kmeans_labels == 1) > min_voxels or np.sum(kmeans_labels == 0) > min_voxels)
                         and (alteredlips > min_diff_lipids)
                         and enough_sections0 and enough_sections1
                         and ((num_peaks0 < peak_count_threshold) or (peak_ratio0 > peak_ratio_threshold)) 
                         and ((num_peaks1 < peak_count_threshold) or (peak_ratio1 > peak_ratio_threshold)))
+
+                print(np.sum(kmeans_labels == 1) > min_voxels)
+                print(np.sum(kmeans_labels == 0) > min_voxels)
+                print(alteredlips > min_diff_lipids)
+                
+
+                
+                print("Flag condition evaluated to:", flag)
                 aaa += 1
                 kmeans_labels = data_for_clustering['lab'].astype(int)
+            
             if not flag:
                 print("Branch exhausted due to failure of continuity or differential criteria.")
                 return None
+        
             # Train an XGB classifier on the embeddings
             embeddings_df = pd.DataFrame(embspace, index=current_adata.obs_names)
+            print("Embeddings dataframe shape:", embeddings_df.shape)
             
             X_train = embeddings_df.loc[embeddings_df.index.isin(trainpoints), :]
             X_val = embeddings_df.loc[embeddings_df.index.isin(valpoints), :]
             X_test = embeddings_df.loc[embeddings_df.index.isin(testpoints), :]
+            print("Training set shape:", X_train.shape)
+            print("Validation set shape:", X_val.shape)
+            print("Test set shape:", X_test.shape)
             
-            kmeans_labels = kmeans_labels -1
+            kmeans_labels = kmeans_labels - 1
             y_train = kmeans_labels.loc[X_train.index]
             y_val = kmeans_labels.loc[X_val.index]
             y_test = kmeans_labels.loc[X_test.index]
             
             X_train_sub, y_train_sub = self._undersample(X_train, y_train)
-            
+            print("After undersampling, training set shape:", X_train_sub.shape)
+        
             xgb_model = XGBClassifier(  
                 n_estimators=xgb_n_estimators, 
                 max_depth=xgb_max_depth, 
@@ -602,11 +725,12 @@ class Clustering:
                 random_state=xgb_random_state,  
                 n_jobs=xgb_n_jobs  
             )
+            print("Training XGB classifier...")
             xgb_model.fit(
                 X_train_sub,
                 y_train_sub,
                 eval_set=[(X_val, y_val)],
-                #callbacks=[xgb.callback.EarlyStopping(rounds=early_stopping_rounds)],  #### CURRENTLY FROZEN DUE TO PACKAGE INCOMPATIBILITIES THAT ARE NON TRIVIAL TO FIX.
+                # callbacks=[xgb.callback.EarlyStopping(rounds=early_stopping_rounds)],  #### CURRENTLY FROZEN DUE TO PACKAGE INCOMPATIBILITIES THAT ARE NON TRIVIAL TO FIX.
                 verbose=False
             )
             test_pred = xgb_model.predict(X_test)
@@ -615,14 +739,19 @@ class Clustering:
             if test_acc < ACCTHR:
                 print("Branch exhausted due to poor classifier generalization.")
                 return None
+        
             # Overwrite cluster labels with classifier predictions (for consistency)
             new_labels = pd.concat([pd.Series(xgb_model.predict(X_train), index=X_train.index),
                                      pd.Series(xgb_model.predict(X_val), index=X_val.index),
                                      pd.Series(xgb_model.predict(X_test), index=X_test.index)])
             new_labels = new_labels.loc[embeddings_df.index]
             new_labels = new_labels + 1  # adjust if needed
+            print("New labels distribution:\n", new_labels.value_counts())
+            
             # Update clustering log
             clusteringLOG.loc[new_labels.index, f"level_{splitlevel+1}"] = new_labels.values
+            print("Updated clustering log for level", splitlevel+1)
+            
             # Create a Node for this split
             node = Node(splitlevel, path=path)
             node.scaler = scaler_local
@@ -630,25 +759,38 @@ class Clustering:
             node.xgb_model = xgb_model
             node.feature_importances = xgb_model.feature_importances_
             node.factors_to_use = selected_nmf_indices
+            print("Created node at level", splitlevel, "with factors:", selected_nmf_indices)
+            
             # Recursively split the two branches
             idx0 = embeddings_df.index[new_labels == 1]
             idx1 = embeddings_df.index[new_labels == 2]
+            print("Branch indices - group 1:", idx0, "\nBranch indices - group 2:", idx1)
             adata0 = current_adata[current_adata.obs_names.isin(idx0)]
             adata1 = current_adata[current_adata.obs_names.isin(idx1)]
             embd0 = embeddings_df.loc[idx0].values
             embd1 = embeddings_df.loc[idx1].values
+            print("Recursing on child 0 with", adata0.X.shape[0], "voxels")
             child0 = _dosplit(adata0, embd0, path + [0], splitlevel + 1)
+            print("Recursing on child 1 with", adata1.X.shape[0], "voxels")
             child1 = _dosplit(adata1, embd1, path + [1], splitlevel + 1)
             node.children[0] = child0
             node.children[1] = child1
+            print("Completed _dosplit at level", splitlevel)
             return node
         
+        # Start the recursive clustering from the root
+        print("\n=== Starting recursive clustering ===")
         root_node = _dosplit(adata[::ds_factor], self.standardized_embeddings_GLOBAL[::ds_factor].values, path=[], splitlevel=0)
+        print("Recursive clustering complete.")
+        
         # Save the clustering log and tree to file.
         clusteringLOG.to_parquet("tree_clustering.parquet")
         with open("rootnode_clustering.pkl", "wb") as f:
             pickle.dump(root_node, f)
+        print("Clustering log and root node saved to file.")
+        
         return root_node, clusteringLOG
+
 
     # -------------------------------------------------------------------------
     # BLOCK 3: Assign colors to clusters based on spatial embedding (for visualization)
