@@ -23,15 +23,24 @@ threadpool_limits(limits=8)
 os.environ['OMP_NUM_THREADS'] = '6'
 
 
-class Embedding:
-    """
-    A class that encapsulates all embedding steps on an AnnData object produced during preprocessing.
-    Each method corresponds to a BLOCK of functionality.
-    """
+class Embedding():
+    
+    def __init__(self, prep):
+        """
+        Initialize the Embedding class with preprocessed data.
+
+        Parameters:
+        -----------
+        prep : object
+            A preprocessing object containing AnnData (adata) with single-cell data.
+        """
+        self.adata = prep.adata
+        self.data_df = pd.DataFrame(prep.adata.X, 
+                                  index=prep.adata.obs_names, 
+                                  columns=prep.adata.var_names).fillna(0.0001)
 
     def learn_seeded_nmf_embeddings(
         self,
-        data: pd.DataFrame,
         resolution_range: tuple = (0.8, 1.5),
         num_gamma: int = 100,
         alpha: float = 0.7,
@@ -43,8 +52,6 @@ class Embedding:
         
         Parameters
         ----------
-        data : pd.DataFrame
-            A DataFrame (pixels x lipids) containing the feature-selected data.
         resolution_range : tuple, optional
             Range of gamma values (Leiden resolution) to explore.
         num_gamma : int, optional
@@ -66,14 +73,14 @@ class Embedding:
             The fitted NMF model.
         """
         # 1. Compute correlation matrix between lipids (features)
-        corr = np.corrcoef(data.values.T)
+        corr = np.corrcoef(self.data_df.values.T)
         corr_matrix = np.abs(corr)
         np.fill_diagonal(corr_matrix, 0)
 
         # Create a dummy AnnData to store connectivity
-        adata = anndata.AnnData(X=np.zeros_like(corr_matrix))
-        adata.obsp['connectivities'] = csr_matrix(corr_matrix)
-        adata.uns['neighbors'] = {
+        temp_adata = anndata.AnnData(X=np.zeros_like(corr_matrix))
+        temp_adata.obsp['connectivities'] = csr_matrix(corr_matrix)
+        temp_adata.uns['neighbors'] = {
             'connectivities_key': 'connectivities',
             'distances_key': 'distances',
             'params': {'n_neighbors': 10, 'method': 'custom'}
@@ -88,8 +95,8 @@ class Embedding:
         objective_values = []
 
         for gamma in gamma_values:
-            sc.tl.leiden(adata, resolution=gamma, key_added=f'leiden_{gamma}')
-            clusters = adata.obs[f'leiden_{gamma}'].astype(int).values
+            sc.tl.leiden(temp_adata, resolution=gamma, key_added=f'leiden_{gamma}')
+            clusters = temp_adata.obs[f'leiden_{gamma}'].astype(int).values
             num_comms = len(np.unique(clusters))
             num_communities.append(num_comms)
             # Compute modularity over communities
@@ -115,8 +122,8 @@ class Embedding:
         print(f'Best gamma: {best_gamma}, Number of communities: {best_num_comms}')
 
         # Run Leiden with best gamma
-        sc.tl.leiden(adata, resolution=best_gamma, key_added='leiden_best')
-        clusters = adata.obs['leiden_best'].astype(int).values
+        sc.tl.leiden(temp_adata, resolution=best_gamma, key_added='leiden_best')
+        clusters = temp_adata.obs['leiden_best'].astype(int).values
         N_factors = best_num_comms
 
         # 4. Choose a representative lipid per cluster
@@ -132,7 +139,7 @@ class Embedding:
                 central_idx = cluster_members[np.argmin(mean_dist)]
                 representatives.append(central_idx)
 
-        W_init = data.values[:, representatives]
+        W_init = self.data_df.values[:, representatives]
 
         # 5. Initialize H from the correlation matrix
         H_init = corr[representatives, :]
@@ -140,20 +147,19 @@ class Embedding:
 
         # 6. Compute NMF with custom initialization
         nmf = NMF(n_components=W_init.shape[1], init='custom', random_state=random_state)
-        data_offset = data - np.min(data) + 1e-7
+        data_offset = self.data_df - np.min(self.data_df) + 1e-7
         data_offset = np.ascontiguousarray(data_offset)
         W_init = np.ascontiguousarray(W_init)
         H_init = np.ascontiguousarray(H_init)
         W = nmf.fit_transform(data_offset, W=W_init, H=H_init)
-        nmf_embeddings = pd.DataFrame(W, index=data.index)
-        factor_to_lipid = nmf.components_
-        return nmf_embeddings, factor_to_lipid, N_factors, nmf
+        self.nmf_embeddings = pd.DataFrame(W, index=self.data_df.index)
+        self.factor_to_lipid = nmf.components_
+        self.N_factors = N_factors
+        self.nmf = nmf
 
     def apply_nmf_embeddings(
         self,
-        new_data: pd.DataFrame,
-        nmf_model: NMF,
-        adata: sc.AnnData = None
+        new_data = None
     ):
         """
         BLOCK 2:
@@ -173,18 +179,20 @@ class Embedding:
         embeddings : pd.DataFrame
             The NMF embeddings for the new data.
         """
-        new_data_offset = new_data - np.min(new_data) + 1e-7
-        new_data_offset = np.ascontiguousarray(new_data_offset)
-        nmf_all = nmf_model.transform(new_data_offset)
-        embeddings = pd.DataFrame(nmf_all, index=new_data.index)
-        if adata is not None:
-            adata.obsm['X_NMF'] = embeddings.values
-        return adata
+        
+        if new_data is not None:
+            new_data_offset = new_data - np.min(new_data) + 1e-7
+            new_data_offset = np.ascontiguousarray(new_data_offset)
+            nmf_all = self.nmf.transform(new_data_offset)
+            embeddings = pd.DataFrame(nmf_all, index=new_data.index)
+            self.adata.obsm['X_NMF'] = embeddings.values
+            
+        else:
+            self.adata.obsm['X_NMF'] = self.nmf_embeddings
 
     def harmonize_nmf_batches(
         self,
-        covariates: list = None, 
-        adata: sc.AnnData = None 
+        covariates: list = None,
     ):
         """
         BLOCK 3:
@@ -199,8 +207,8 @@ class Embedding:
         -------
             adata with an X_Harmonized slot
         """
-        nmf_embeddings = pd.DataFrame(adata.obsm['X_NMF'], index=adata.obs_names)
-        batches = adata.obs[covariates].astype("category")
+        nmf_embeddings = pd.DataFrame(self.adata.obsm['X_NMF'], index=self.adata.obs_names)
+        batches = self.adata.obs[covariates].astype("category")
         batchessub = batches.copy()
         unique_values = sorted(batchessub['SectionID'].unique())
         value_mapping = {old_value: new_index for new_index, old_value in enumerate(unique_values)}
@@ -209,13 +217,10 @@ class Embedding:
         vars_use=list(batchessub.columns)
         
         ho = hm.run_harmony(nmf_embeddings, batchessub, vars_use, max_iter_harmony=20)
-        adata.obsm['X_Harmonized'] = ho.Z_corr.T
-        return adata
+        self.adata.obsm['X_Harmonized'] = ho.Z_corr.T
 
     def approximate_dataset_harmonmf(
-        self,
-        adata: sc.AnnData,
-        factor_to_lipid: np.ndarray,
+        self
     ):
         """
         BLOCK 4:
@@ -232,15 +237,13 @@ class Embedding:
         -------
             an X_approximated slot
         """
-        corrected_embeddings = adata.obsm['X_Harmonized']
-        original_feature_names = adata.var_names
-        recon = np.dot(corrected_embeddings, factor_to_lipid)
-        adata.obsm['X_approximated'] = recon - np.min(recon) + 1e-7
-        return adata
+        recon = np.dot(self.adata.obsm['X_Harmonized'], self.factor_to_lipid)
+        self.adata.obsm['X_approximated'] = recon - np.min(recon) + 1e-7
+        
+        return ""
 
     def tsne(
         self,
-        adata: sc.AnnData,
         perplexity: int = 30,
         n_iter1: int = 500,
         exaggeration1: float = 1.2,
@@ -276,9 +279,9 @@ class Embedding:
         """
 
         try:
-            embeddings = adata.obsm["X_Harmonized"]
+            embeddings = self.adata.obsm["X_Harmonized"]
         except:
-            embeddings = adata.obsm["X_NMF"]
+            embeddings = self.adata.obsm["X_NMF"]
         scaler = StandardScaler()
         x_train = scaler.fit_transform(embeddings)
         affinities_train = affinity.PerplexityBasedNN(
@@ -298,5 +301,20 @@ class Embedding:
             verbose=True,
         )
         tsne_emb_1 = tsne_emb.optimize(n_iter=n_iter1, exaggeration=exaggeration1)
-        adata.obsm['X_TSNE'] = np.array(tsne_emb_1.optimize(n_iter=n_iter2, exaggeration=exaggeration2))
-        return adata
+        self.adata.obsm['X_TSNE'] = np.array(tsne_emb_1.optimize(n_iter=n_iter2, exaggeration=exaggeration2))
+        
+    def save_msi_dataset(
+        self,
+        filename="emb_msi_dataset.h5ad"
+    ):
+        """
+        Save the current AnnData object to disk.
+
+        Parameters
+        ----------
+        adata : sc.AnnData
+            The AnnData object containing MSI data.
+        filename : str, optional
+            File path to save the AnnData object.
+        """
+        self.adata.write_h5ad(filename)

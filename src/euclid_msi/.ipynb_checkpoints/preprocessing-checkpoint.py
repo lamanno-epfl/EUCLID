@@ -7,7 +7,7 @@ import squidpy as sq
 import warnings
 import datetime
 import matplotlib.pyplot as plt
-
+import itertools
 from tqdm import tqdm
 from rdkit import Chem
 from sklearn.preprocessing import StandardScaler
@@ -93,7 +93,7 @@ class Preprocessing:
         return morans_by_sec
 
 
-    def store_exp_data_metadata(
+    def store_exp_data_metadata( # NOTE THAT THIS ALSO SERVES AS AN INIT AS IT CREATES THE SELF.ADATA
         self,
         path_data,
         acquisitions=None,
@@ -187,6 +187,7 @@ class Preprocessing:
 
         # Save to disk
         adata.write_h5ad(output_anndata)
+        self.adata = adata
         
         return adata
 
@@ -273,7 +274,6 @@ class Preprocessing:
 
     def annotate_molecules(
         self,
-        msipeaks,
         structures_sdf="structures.sdf",
         hmdb_csv="HMDB_complete.csv",
         user_annotation_csv=None,
@@ -300,7 +300,8 @@ class Preprocessing:
         """
         from rdkit import Chem
 
-        peaks_df = pd.DataFrame(msipeaks, index = msipeaks, columns = ["PATH_MZ"])
+        msipeaks = self.adata.var_names.tolist()
+        peaks_df = pd.DataFrame(msipeaks, columns = ["PATH_MZ"], index = msipeaks)
 
         # Load LIPID MAPS from SDF
         supplier = Chem.SDMolSupplier(structures_sdf)
@@ -381,17 +382,23 @@ class Preprocessing:
                     return None
     
             peaks_df['Lipid'] = [_find_matching_lipids(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
+            user_df.index = user_df['m/z'].astype(str)
+            peaks_df.index = peaks_df.index.astype(str)
+            
                 
         except:
             print("No paired LC-MS or METASPACE annotation dataset provided. Are you sure you want to continue with database search only?")
+            
+        peaks_df['Score'] = 0
+        common_indices = peaks_df.index.intersection(user_df.index)
+        peaks_df.loc[common_indices, 'Score'] = user_df.loc[common_indices, 'Score']
 
         return peaks_df
 
 
     def save_msi_dataset(
         self,
-        adata: sc.AnnData,
-        filename="msi_dataset.h5ad"
+        filename="prep_msi_dataset.h5ad"
     ):
         """
         Save the current AnnData object to disk.
@@ -403,10 +410,10 @@ class Preprocessing:
         filename : str, optional
             File path to save the AnnData object.
         """
-        adata.write_h5ad(filename)
+        self.adata.write_h5ad(filename)
 
 
-    def load_msi_dataset(
+    def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
         self,
         filename="msi_dataset.h5ad"
     ) -> sc.AnnData:
@@ -423,7 +430,9 @@ class Preprocessing:
         sc.AnnData
             The loaded AnnData object.
         """
-        return sc.read_h5ad(filename)
+        adata = sc.read_h5ad(filename)
+        self.adata = adata
+        return adata
 
 
     def prioritize_adducts(
@@ -508,7 +517,6 @@ class Preprocessing:
 
     def feature_selection(
         self,
-        adata: sc.AnnData,
         moran: pd.DataFrame,
         modality: str = "combined",  # options: "moran", "combined", "manual"
         mz_vals: list = None,  # if provided, these m/z values override all other criteria
@@ -553,7 +561,7 @@ class Preprocessing:
         from sklearn.preprocessing import StandardScaler
         from sklearn.cluster import KMeans
         import scanpy as sc
-    
+        
         # --- Step 0. Manual override: if mz_vals is provided, simply use these features.
         if mz_vals is not None and len(mz_vals) > 0:
             # Convert m/z values to strings (to match adata.var_names)
@@ -577,7 +585,7 @@ class Preprocessing:
             mean_moran = sub_moran.mean(axis=1)
     
             # Prepare data: create a DataFrame from adata.X (clamping values above 1.0)
-            df_input = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+            df_input = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs_names)
             df_input[df_input > 1.0] = 0.0001  # clamp extreme values
     
             # Standardize data
@@ -588,11 +596,11 @@ class Preprocessing:
             # Build a temporary AnnData for scoring
             temp_adata = sc.AnnData(X=df_scaled)
             # If spatial section information exists, attach it (using 'SectionID' if available)
-            if 'Section' in adata.obs.columns:
-                if 'SectionID' in adata.obs.columns:
-                    temp_adata.obsm['spatial'] = adata.obs['SectionID'].values
+            if 'Section' in self.adata.obs.columns:
+                if 'SectionID' in self.adata.obs.columns:
+                    temp_adata.obsm['spatial'] = self.adata.obs['SectionID'].values
                 else:
-                    temp_adata.obsm['spatial'] = adata.obs['Section'].values
+                    temp_adata.obsm['spatial'] = self.adata.obs['Section'].values
             else:
                 temp_adata.obsm['spatial'] = np.zeros((df_scaled.shape[0], 1))
     
@@ -612,12 +620,12 @@ class Preprocessing:
             
             # --- Dropout filtering: for each feature, compute the number of sections where the mean is below a threshold.
             section_col = None
-            if 'SectionID' in adata.obs.columns:
+            if 'SectionID' in self.adata.obs.columns:
                 section_col = 'SectionID'
-            elif 'Section' in adata.obs.columns:
+            elif 'Section' in self.adata.obs.columns:
                 section_col = 'Section'
             if section_col is not None:
-                peakmeans = df_input.groupby(adata.obs[section_col]).mean()
+                peakmeans = df_input.groupby(self.adata.obs[section_col]).mean()
                 missinglipid = np.sum(peakmeans < 0.00015)
                 dropout_acceptable = set(missinglipid[missinglipid < 4].index.astype(float).astype(str))
                 scores_df = scores_df.loc[scores_df.index.isin(dropout_acceptable)]
@@ -700,8 +708,8 @@ class Preprocessing:
     
         # --- Subset the AnnData object to only the selected features.
         # Ensure that the features in the selection actually exist in adata.var_names.
-        final_features = [f for f in adata.var_names if f in selected_features]
-        feature_selected_adata = adata[:, final_features].copy()
+        final_features = [f for f in self.adata.var_names if f in selected_features]
+        feature_selected_adata = self.adata[:, final_features].copy()
     
         # Annotate the AnnData object with the feature selection scores table for later reference.
         feature_selected_adata.uns["feature_selection_scores"] = scores_df if 'scores_df' in locals() else None
@@ -709,10 +717,10 @@ class Preprocessing:
         # Save the scores table to a CSV file.
         scores_df.to_csv(output_csv)
         
-        return feature_selected_adata
+        self.adata = feature_selected_adata
     
     
-    def _rank_features_by_combined_score(self, adata: sc.AnnData):
+    def _rank_features_by_combined_score(self, temp_adata):
         """
         Helper method to rank features by a combined score of variance metrics.
     
@@ -728,15 +736,15 @@ class Preprocessing:
         """
         import numpy as np
     
-        sections = adata.obsm['spatial']
+        sections = temp_adata.obsm['spatial']
         unique_sections = np.unique(sections)
     
         var_of_vars = []
         mean_of_vars = []
     
         # Evaluate each feature
-        for i in range(adata.X.shape[1]):
-            feature_values = adata.X[:, i]
+        for i in range(temp_adata.X.shape[1]):
+            feature_values = temp_adata.X[:, i]
             section_variances = []
             for sec in unique_sections:
                 sec_vals = feature_values[sections == sec]
@@ -754,7 +762,6 @@ class Preprocessing:
 
     def min0max1_normalize_clip(
         self,
-        df_input: pd.DataFrame,
         lower_quantile=0.005,
         upper_quantile=0.995
     ):
@@ -775,6 +782,7 @@ class Preprocessing:
         pd.DataFrame
             The normalized DataFrame (values in [0,1]).
         """
+        df_input = pd.DataFrame(self.adata.X)
         p2 = df_input.quantile(lower_quantile)
         p98 = df_input.quantile(upper_quantile)
 
@@ -785,11 +793,98 @@ class Preprocessing:
         normalized = (arr - p2_vals) / (p98_vals - p2_vals)
         clipped = np.clip(normalized, 0, 1)
 
-        df_norm = pd.DataFrame(clipped, columns=df_input.columns, index=df_input.index)
-        return df_norm
+        df_norm = pd.DataFrame(
+            clipped,
+            columns=self.adata.var_names,
+            index=self.adata.obs_names,
+        )
+        self.adata.obsm['X_01norm'] = df_norm
+        
+        
+    def rename_features(
+        self,
+        peaks_df,
+        annotation_col='Lipid',
+        score_col="Score",
+        min_score=None,
+        fallback_to_original=True
+    ):
+        """
+        Rename and optionally filter features in self.adata based on an annotation DataFrame.
 
+        Parameters
+        ----------
+        peaks_df : pd.DataFrame
+            DataFrame returned by `annotate_molecules`, indexed by original m/z strings,
+            containing at least the annotation_col and (optionally) a score column.
+        annotation_col : str, optional
+            Column in peaks_df to use for renaming. Default 'LIPIDMAPS'.
+        score_col : str, optional
+            Column in peaks_df containing a numeric score for the annotation match.
+        min_score : float, optional
+            Minimum score required to apply a rename. Any feature whose annotation score
+            is below this (or missing) will be dropped entirely.
+        fallback_to_original : bool, optional
+            If True, and a feature has no annotation or score_col isn't provided,
+            its original m/z name is retained; otherwise its name becomes None.
 
-    def lipid_properties(self, adata, color_map_file="lipidclasscolors.h5ad"):
+        Returns
+        -------
+        None
+            Updates `self.adata` in place: filters out low-scoring features and renames the rest.
+        """
+        import pandas as pd
+        from collections import Counter
+
+        # Validate inputs
+        if annotation_col not in peaks_df.columns:
+            raise KeyError(f"Column '{annotation_col}' not found in peaks_df")
+        if score_col and score_col not in peaks_df.columns:
+            raise KeyError(f"Score column '{score_col}' not found in peaks_df")
+
+        # Build mappings
+        name_map = peaks_df[annotation_col].to_dict()
+        score_map = peaks_df[score_col].to_dict() if score_col else {}
+
+        original_vars = list(self.adata.var_names)
+        keep_vars = []
+        new_names = []
+
+        for var in original_vars:
+            # Determine if we drop based on score threshold
+            if score_col and min_score is not None and var in score_map:
+                sc = score_map.get(var)
+                # drop if score missing or below threshold
+                if pd.isna(sc) or sc < min_score:
+                    continue
+
+            # Decide new name
+            if var in name_map and pd.notna(name_map[var]):
+                new_name = str(name_map[var])
+            else:
+                new_name = var if fallback_to_original else None
+
+            keep_vars.append(var)
+            new_names.append(new_name)
+
+        # Subset AnnData to only kept features
+        self.adata = self.adata[:, keep_vars].copy()
+
+        # Ensure unique names: append suffix to duplicates
+        counts = Counter(new_names)
+        dup_counters = {n:0 for n,c in counts.items() if c>1 and n is not None}
+        unique_names = []
+        for nm in new_names:
+            if nm in dup_counters:
+                dup_counters[nm] += 1
+                unique_names.append(f"{nm}_{dup_counters[nm]}")
+            else:
+                unique_names.append(nm)
+
+        # Assign new var_names
+        self.adata.var_names = unique_names
+
+    def lipid_properties(self, color_map_file="lipidclasscolors.h5ad"):
         """
         Extract basic lipid properties from a list of lipid names.
 
@@ -807,7 +902,7 @@ class Preprocessing:
             insaturations_per_Catom, broken, color].
         """
 
-        lipid_names = adata.var_names.values
+        lipid_names = self.adata.var_names.values
         
         df = pd.DataFrame(lipid_names, columns=["lipid_name"]).fillna('')
         # Regex extraction
@@ -835,7 +930,7 @@ class Preprocessing:
         return df
 
 
-    def reaction_network(self, lipid_props_df, premanannot):
+    def reaction_network(self, lipid_props_df, premanannot=None):
         """
         Extract a reaction network based on lipid classes and transformation rules.
 
@@ -843,14 +938,15 @@ class Preprocessing:
         ----------
         lipid_props_df : pd.DataFrame
             A DataFrame with lipid properties (index=lipid_name, columns=class,carbons,insaturations,...).
-        premanannot : pd.DataFrame
-            A DataFrame with columns ['reagent','product'] at least, plus user-defined columns.
-
         Returns
         -------
         pd.DataFrame
             Filtered premanannot that satisfies the transformation rules.
         """
+        if premanannot is None:
+            all_pairs = list(itertools.product(lipid_props_df.index, lipid_props_df.index))
+            premanannot = pd.DataFrame(all_pairs, columns=['reagent', 'product'])
+            
         df = lipid_props_df.copy()
         if df.index.name != 'lipid_name':
             df.set_index('lipid_name', inplace=True)
