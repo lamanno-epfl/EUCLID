@@ -94,60 +94,29 @@ class Clustering:
     
     Parameters
     ----------
-    emb: a EUCLID Embedding object
+    adata : sc.AnnData
+        AnnData object produced by the embedding module.
+    coordinates : pd.DataFrame
+        Spatial coordinates for each observation. Columns should include
+        either ['Section','xccf','yccf','zccf'] or ['Section','z','y','x'].
+    reconstructed_data_df : pd.DataFrame
+        Approximated dataset (e.g. from harmonized NMF reconstruction).
+    standardized_embeddings_GLOBAL : pd.DataFrame
+        Global standardized embeddings (learned from the reference dataset).
+    metadata : pd.DataFrame, optional
+        Additional metadata (e.g., used for merging spatial metadata).
     """
-    def __init__(self, emb):
-        
-        try:
-            self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_Harmonized']),
-                                                          index=emb.adata.obs_names)
-        except:
-            self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_NMF']),
-                                                          index=emb.adata.obs_names)
-        metadata = emb.adata.obs.copy()
-        coordinates = metadata[['x','y','SectionID', 'SectionID']]
-        coordinates.columns = ["zccf","yccf","Section","xccf"]
-        
-        self.adata = emb.adata
+    def __init__(self, adata, coordinates, standardized_embeddings_GLOBAL, metadata):
+        self.adata = adata
         self.coordinates = coordinates
-        self.reconstructed_data_df = pd.DataFrame(
-            emb.adata.obsm['X_approximated'],
-            index=emb.adata.obs_names
-        )
+        self.reconstructed_data_df = adata.obsm['X_approximated']
+        self.standardized_embeddings_GLOBAL = standardized_embeddings_GLOBAL
         self.metadata = metadata
         
         vcnorm = self.coordinates.loc[self.reconstructed_data_df.index, 'Section'] \
              .value_counts()
         vcnorm.index = vcnorm.index.astype(int)
         vcnorm = vcnorm.sort_index()
-        
-        data = pd.DataFrame(
-            self.adata.X,
-            index=self.adata.obs_names,
-            columns=self.adata.var_names
-        )
-        rawlips = data.copy()
-        data = self.reconstructed_data_df
-        
-        # do vmin-vmax normalization with the percentiles + clipping for differential lipids testing
-        datemp = rawlips.copy() 
-        p2 = datemp.quantile(0.02)
-        p98 = datemp.quantile(0.98)
-
-        datemp_values = datemp.values
-        p2_values = p2.values
-        p98_values = p98.values
-
-        normalized_values = (datemp_values - p2_values) / (p98_values - p2_values)
-
-        clipped_values = np.clip(normalized_values, 0, 1)
-
-        normalized_datemp = pd.DataFrame(clipped_values, columns=datemp.columns, index=datemp.index)
-
-        self.adatamaia = sc.AnnData(X=data)
-        self.adatamaia.obsm['spatial'] = self.coordinates[['zccf', 'yccf', 'Section']].loc[data.index,:].values
-
-        self.adatamaia.obsm['lipids'] = normalized_datemp
 
     # -------------------------------------------------------------------------
     # BLOCK 1: Conventional Leiden clustering on harmonized NMF embeddings
@@ -470,30 +439,84 @@ class Clustering:
                                 spat_columns=['zccf','yccf','Section'],
                                 min_val_threshold=10,
                                 min_nonzero_sections=3,
-                                gaussian_sigma=1.8,
-                                default_peak_ratio=10,
-                                peak_count_threshold=3,
-                                peak_ratio_threshold=1.4,
+                                gaussian_sigma=1.8, 
+                                default_peak_ratio=10, 
+                                peak_count_threshold=3, 
+                                peak_ratio_threshold=1.4, 
                                 combinations=200,
                                 xgb_n_estimators=1000,
-                                xgb_max_depth=8,
-                                xgb_learning_rate=0.02,
-                                xgb_subsample=0.8,
-                                xgb_colsample_bytree=0.8,
+                                xgb_max_depth=8, 
+                                xgb_learning_rate=0.02,  
+                                xgb_subsample=0.8, 
+                                xgb_colsample_bytree=0.8, 
                                 xgb_gamma=0.5,
                                 xgb_random_state=42,
-                                xgb_n_jobs=6,
-                                early_stopping_rounds=7):
+                                xgb_n_jobs=6, 
+                                early_stopping_rounds=7 
+                                ):
         """
         Learn a hierarchical bipartite clustering tree on the dataset.
         This is a self-supervised clustering method that recursively splits the dataset,
         computes local NMFs, reaggregates clusters (e.g., via backSPIN), and trains an XGBoost
         classifier at each split.
-
+        
         Parameters
         ----------
-        (all parameters as before)
-
+        K : int
+            Large K for initial kMeans split.
+        min_voxels : int
+            Minimum number of observations per branch.
+        min_diff_lipids : int
+            Minimum number of differential lipids to accept a split.
+        min_fc : float
+            Minimal fold change for differential lipids.
+        pthr : float
+            p-value threshold after correction.
+        thr_signal : float
+            Threshold on signal to keep an NMF component.
+        penalty1 : float
+            Penalty factor for previous split embeddings.
+        penalty2 : float
+            Penalty factor for global embeddings.
+        ACCTHR : float
+            Lower bound for test accuracy to accept the classifier.
+        max_depth : int
+            Maximum recursive depth.
+        ds_factor : int
+            Downsampling factor.
+        spat_columns : list, optional  ##EDITED
+            List of column names for spatial coordinates. (Default is ['zccf','yccf','Section'])
+        min_val_threshold : int, optional  ##EDITED
+            Minimum value threshold for continuity check. (Default is 10)
+        min_nonzero_sections : int, optional  ##EDITED
+            Minimum nonzero sections for continuity check. (Default is 3)
+        gaussian_sigma : float, optional  ##EDITED
+            Sigma for Gaussian smoothing in continuity check. (Default is 1.8)
+        default_peak_ratio : float, optional  ##EDITED
+            Default peak ratio in continuity check. (Default is 10)
+        peak_count_threshold : int, optional  ##EDITED
+            Threshold for the number of peaks in continuity check. (Default is 3)
+        peak_ratio_threshold : float, optional  ##EDITED
+            Threshold for the peak ratio in continuity check. (Default is 1.4)
+        xgb_n_estimators : int, optional  ##EDITED
+            Number of estimators for XGBClassifier. (Default is 1000)
+        xgb_max_depth : int, optional  ##EDITED
+            Maximum tree depth for XGBClassifier. (Default is 8)
+        xgb_learning_rate : float, optional  ##EDITED
+            Learning rate for XGBClassifier. (Default is 0.02)
+        xgb_subsample : float, optional  ##EDITED
+            Subsample ratio for XGBClassifier. (Default is 0.8)
+        xgb_colsample_bytree : float, optional  ##EDITED
+            Column sample by tree for XGBClassifier. (Default is 0.8)
+        xgb_gamma : float, optional  ##EDITED
+            Gamma for XGBClassifier. (Default is 0.5)
+        xgb_random_state : int, optional  ##EDITED
+            Random state for XGBClassifier. (Default is 42)
+        xgb_n_jobs : int, optional  ##EDITED
+            Number of jobs for XGBClassifier. (Default is 6)
+        early_stopping_rounds : int, optional  ##EDITED
+            Early stopping rounds for XGBClassifier fit. (Default is 7)
+        
         Returns
         -------
         root_node : Node
@@ -501,27 +524,37 @@ class Clustering:
         clusteringLOG : pd.DataFrame
             A DataFrame recording the split history.
         """
-        # 1) SPLIT INTO TRAIN/VAL/TEST BASED ON SECTIONS OR RANDOM
+        # Get unique sections
         unique_sections = self.coordinates['Section'].unique()
+        print("Unique sections:", unique_sections)
         num_sections = len(unique_sections)
-
+        
+        # Check if we have enough sections for the original splitting approach
         if num_sections >= 3:
-            # Initialize splits
+            # Initialize empty arrays
+            valsec = np.array([], dtype=int)
+            testsec = np.array([], dtype=int)
+            
+            # Apply the proportional rule, but ensure at least one section in each split
             if num_sections >= 5:
                 valsec = (unique_sections[::5] + 2)[:-1]
                 testsec = (unique_sections[::5] + 1)[:-1]
             else:
+                # For fewer sections but still >=3, assign at least one to each group
                 valsec = np.array([unique_sections[0]])
                 testsec = np.array([unique_sections[1]])
-
+            
+            # Double check that validation and test sections are not empty
             if len(valsec) == 0:
                 valsec = np.array([unique_sections[0]])
             if len(testsec) == 0:
+                # Avoid overlap with validation
                 for sec in unique_sections:
                     if sec not in valsec:
                         testsec = np.array([sec])
                         break
-
+            
+            # The rest go to training
             trainsec = np.setdiff1d(np.setdiff1d(unique_sections, testsec), valsec)
             if len(trainsec) == 0:
                 if len(valsec) > len(testsec):
@@ -530,180 +563,219 @@ class Clustering:
                 else:
                     trainsec = np.array([testsec[-1]])
                     testsec = testsec[:-1]
-
-            valpoints = self.coordinates.loc[self.coordinates['Section'].isin(valsec), :].index
-            testpoints = self.coordinates.loc[self.coordinates['Section'].isin(testsec), :].index
-            trainpoints = self.coordinates.loc[self.coordinates['Section'].isin(trainsec), :].index
-
+            
+            print("Validation sections (valsec):", valsec)
+            print("Test sections (testsec):", testsec)
+            print("Train sections (trainsec):", trainsec)
+            
+            # Identify point indices for each group
+            valpoints = self.coordinates.loc[self.coordinates['Section'].isin(valsec),:].index
+            testpoints = self.coordinates.loc[self.coordinates['Section'].isin(testsec),:].index
+            trainpoints = self.coordinates.loc[self.coordinates['Section'].isin(trainsec),:].index
+            
         else:
-            # 60-20-20 random split
-            all_indices = self.coordinates.index.values.copy()
+            # Classic 60-20-20 split on the rows (ignoring sections)
+            print("Less than 3 unique sections found. Using 60-20-20 split on rows.")
+            
+            # Shuffle indices to ensure random selection
+            all_indices = self.coordinates.index.values
             np.random.shuffle(all_indices)
+            
+            # Calculate split sizes
             n_samples = len(all_indices)
             n_train = int(0.6 * n_samples)
             n_val = int(0.2 * n_samples)
-
+            
+            # Split indices
             trainpoints = all_indices[:n_train]
-            valpoints = all_indices[n_train:n_train + n_val]
-            testpoints = all_indices[n_train + n_val:]
-
-        # 3) INITIALIZE CLUSTERING LOG
-        column_names = [f"level_{i}" for i in range(1, max_depth + 1)]
-        clusteringLOG = pd.DataFrame(
-            0,
-            index=self.reconstructed_data_df.index,
-            columns=column_names
-        )[::ds_factor]
-
-        # 4) DEFINE RECURSIVE SPLITTING FUNCTION
-        def _dosplit(current_adata, embds, path=None, splitlevel=0):
-            if path is None:
-                path = []
-
-            # a) STOP CONDITIONS
+            valpoints = all_indices[n_train:n_train+n_val]
+            testpoints = all_indices[n_train+n_val:]
+            
+            # For consistency with the section-based approach
+            trainsec = np.array([])
+            valsec = np.array([])
+            testsec = np.array([])
+        
+        # Prepare data for clustering
+        data = pd.DataFrame(self.reconstructed_data_df.copy(), index=self.standardized_embeddings_GLOBAL.index)
+        print("Data shape:", data.shape)
+        rawlips = data.copy()
+        print("Raw lipids data shape:", rawlips.shape)
+        
+        # Normalize raw data using percentiles (2% and 98%)
+        p2 = rawlips.quantile(0.02)
+        p98 = rawlips.quantile(0.98)
+        print("2nd percentile values:\n", p2)
+        print("98th percentile values:\n", p98)
+        normalized_values = (rawlips.values - p2.values) / (p98.values - p2.values)
+        print("Normalized values shape:", normalized_values.shape)
+        clipped_values = np.clip(normalized_values, 0, 1)
+        normalized_datemp = pd.DataFrame(clipped_values, columns=rawlips.columns, index=rawlips.index)
+        print("Normalized and clipped data shape:", normalized_datemp.shape)
+        
+        # Prepare a Scanpy object with raw lipids for differential testing.
+        adata = sc.AnnData(X=data)
+        adata.obsm['spatial'] = self.coordinates[['zccf','yccf','Section']].loc[data.index].values
+        adata.obsm['lipids'] = normalized_datemp
+        print("Created AnnData with shape:", adata.shape)
+        print("Sample spatial coordinates:\n", adata.obsm['spatial'][:5])
+        print("Sample lipid data:\n", normalized_datemp.iloc[:5])
+        
+        # Initialize a log DataFrame for clustering history.
+        column_names = [f"level_{i}" for i in range(1, max_depth+1)]
+        clusteringLOG = pd.DataFrame(0, index=data.index, columns=column_names)[::ds_factor]
+        print("Initialized clustering log with shape:", clusteringLOG.shape)
+        
+        # Define the recursive splitting function.
+        def _dosplit(current_adata, embds, path=[], splitlevel=0):
+            print("\n=== Entering _dosplit at level:", splitlevel, "with", current_adata.X.shape[0], "voxels ===")
             if current_adata.X.shape[0] < min_voxels:
+                print("Branch exhausted due to low voxel count:", current_adata.X.shape[0])
                 return None
             if splitlevel > max_depth:
+                print("Branch stopped as the maximum depth requested by the user has been reached")
                 return None
-
-            # b) COMPUTE LOCAL NMF
-            nmfdf, loadings, N_factors, nmf_model = self._compute_seeded_NMF(
-                pd.DataFrame(current_adata.X, index=current_adata.obs_names)
-            )
+            
+            # Compute a local NMF on current data
+            nmfdf, loadings, N_factors, nmf_model = self._compute_seeded_NMF(pd.DataFrame(current_adata.X, index=current_adata.obs_names))
             nmf_result = nmfdf.values
-
-            # c) FILTER LOW-SIGNAL COMPONENTS
+            print("Computed NMF. nmfdf shape:", nmfdf.shape, "N_factors:", N_factors)
+            print("Loadings shape:", loadings.shape)
+            print("Mean absolute values per factor:", np.abs(nmf_result).mean(axis=0))
+            
             filter1 = np.abs(nmf_result).mean(axis=0) > thr_signal
             loadings_sel = loadings[filter1, :]
             nmf_result = nmf_result[:, filter1]
             original_nmf_indices = np.arange(N_factors)[filter1]
-
+            print("Selected", filter1.sum(), "factors after filtering out of", len(filter1))
+            print("Shape of filtered nmf_result:", nmf_result.shape)
+            
             tempadata = sc.AnnData(X=nmf_result)
             tempadata.obsm['spatial'] = current_adata.obsm['spatial']
-
-            # d) RANK FEATURES
+            
+            # Rank features by combined score
             goodpcs = self._rank_features_by_combined_score(tempadata)
+            print("Ranked features (goodpcs):", goodpcs)
             goodpcs_indices = original_nmf_indices[goodpcs.astype(int)]
             top_pcs_data = nmf_result[:, goodpcs.astype(int)]
             loadings_sel = loadings_sel[goodpcs.astype(int), :]
-
-            # e) GENERATE COMBINATIONS
+            print("Top PCs data shape:", top_pcs_data.shape)
+            print("Indices of good principal components:", goodpcs_indices)
+            
             multiplets = self._generate_combinations(len(goodpcs), limit=combinations)
+            print("Generated multiplets count:", len(multiplets))
             flag = False
             aaa = 0
-
-            # f) ITERATIVE SEARCH FOR ACCEPTABLE SPLIT
+        
+            # Begin iterative search for acceptable split
             while (not flag) and (aaa < len(multiplets)):
                 bestpcs = multiplets[aaa]
+                print("\nIteration", aaa, "using bestpcs indices:", bestpcs)
                 embeddings_local = top_pcs_data[:, bestpcs]
                 loadings_current = loadings_sel[list(bestpcs), :]
                 selected_nmf_indices = goodpcs_indices[list(bestpcs)]
-
                 scaler_local = StandardScaler()
                 standardized_embeddings = scaler_local.fit_transform(embeddings_local)
-
-                # Combine embeddings: local, previous-level, global
+                print("Standardized embeddings shape:", standardized_embeddings.shape)
+                
+                # Combine with previous split and global embeddings
                 globembds = self.standardized_embeddings_GLOBAL.loc[current_adata.obs_names].values / penalty2
-                embspace = np.concatenate(
-                    (standardized_embeddings,
-                     embds / penalty1,
-                     globembds),
-                    axis=1
-                )
-
-                # KMeans + backSPIN reaggregation
+                embspace = np.concatenate((standardized_embeddings, embds/penalty1, globembds), axis=1)
+                print("Combined embedding space shape:", embspace.shape)
+                
                 kmeans = KMeans(n_clusters=K, random_state=230598)
                 kmeans_labels = kmeans.fit_predict(embspace)
-
-                data_for_clustering = pd.DataFrame(
-                    current_adata.X,
-                    index=current_adata.obs_names,
-                    columns=current_adata.var_names
-                )
+                print("KMeans labels distribution:", np.bincount(kmeans_labels))
+                
+                # Reaggregate via backSPIN (using its API)
+                data_for_clustering = pd.DataFrame(current_adata.X, index=current_adata.obs_names, columns=current_adata.var_names)
                 data_for_clustering['label'] = kmeans_labels
-
                 centroids = data_for_clustering.groupby('label').mean()
-                centroids = pd.DataFrame(
-                    StandardScaler().fit_transform(centroids),
-                    columns=centroids.columns,
-                    index=centroids.index
-                ).T
+                centroids = pd.DataFrame(StandardScaler().fit_transform(centroids), columns=centroids.columns, index=centroids.index).T
+                print("Centroids shape after standardization and transpose:", centroids.shape)
                 row_ix, columns_ix = backSPIN.SPIN(centroids, widlist=4)
                 centroids = centroids.iloc[row_ix, columns_ix]
-                _, _, _, gr1, gr2, _, _, _, _ = backSPIN._divide_to_2and_resort(
-                    sorted_data=centroids.values,
-                    wid=5
-                )
+                print("Centroids shape after backSPIN reordering:", centroids.shape)
+                _, _, _, gr1, gr2, _, _, _, _ = backSPIN._divide_to_2and_resort(sorted_data=centroids.values, wid=5)
                 gr1 = np.array(centroids.columns)[gr1]
                 gr2 = np.array(centroids.columns)[gr2]
-
+                print("Division groups sizes: gr1 =", len(gr1), "gr2 =", len(gr2))
                 data_for_clustering['lab'] = 1
-                data_for_clustering.loc[
-                    data_for_clustering['label'].isin(gr2), 'lab'
-                ] = 2
-
-                # Continuity check
-                (enough_sections0,
-                 enough_sections1,
-                 num_peaks0,
-                 num_peaks1,
-                 peak_ratio0,
-                 peak_ratio1) = self._continuity_check(
-                    current_adata.obsm['spatial'],
-                    kmeans_labels=np.array(data_for_clustering['lab']),
-                    spat_columns=spat_columns,
+                data_for_clustering.loc[data_for_clustering['label'].isin(gr2), 'lab'] = 2
+        
+                # Check continuity along AP axis using self.coordinates and differential lipids in adata.obsm['lipids']
+                enough_sections0, enough_sections1, num_peaks0, num_peaks1, peak_ratio0, peak_ratio1 = self._continuity_check(
+                    current_adata.obsm['spatial'], kmeans_labels=np.array(data_for_clustering['lab']),
+                    spat_columns=spat_columns, 
                     min_val_threshold=min_val_threshold,
-                    min_nonzero_sections=min_nonzero_sections,
-                    gaussian_sigma=gaussian_sigma,
-                    default_peak_ratio=default_peak_ratio
+                    min_nonzero_sections=min_nonzero_sections, 
+                    gaussian_sigma=gaussian_sigma, 
+                    default_peak_ratio=default_peak_ratio 
                 )
+                print("Continuity check results:",
+                      "enough_sections0 =", enough_sections0,
+                      "enough_sections1 =", enough_sections1,
+                      "num_peaks0 =", num_peaks0,
+                      "num_peaks1 =", num_peaks1,
+                      "peak_ratio0 =", peak_ratio0,
+                      "peak_ratio1 =", peak_ratio1)
+                
+                #alteredlips, promoted = self._differential_lipids(self.raw_data_df.loc[current_adata.obs_names].values,
+                 #         kmeans_labels, min_fc, pthr)
 
-                # Differential lipids
-                alteredlips, promoted = self._differential_lipids(
-                    current_adata.obsm['lipids'].values,
-                    kmeans_labels,
-                    min_fc,
-                    pthr
-                )
+                alteredlips, promoted = self._differential_lipids(current_adata.obsm['lipids'].values, kmeans_labels, min_fc, pthr)
+                print("Differential lipids count:", alteredlips, "Promoted:", promoted)
+                
+                flag = ((np.sum(kmeans_labels == 1) > min_voxels or np.sum(kmeans_labels == 0) > min_voxels)
+                        and (alteredlips > min_diff_lipids)
+                        and enough_sections0 and enough_sections1
+                        and ((num_peaks0 < peak_count_threshold) or (peak_ratio0 > peak_ratio_threshold)) 
+                        and ((num_peaks1 < peak_count_threshold) or (peak_ratio1 > peak_ratio_threshold)))
 
-                # Check split criteria
-                cond_size = (np.sum(kmeans_labels == 1) > min_voxels) or (np.sum(kmeans_labels == 0) > min_voxels)
-                cond_diff = (alteredlips > min_diff_lipids)
-                cond_cont0 = ((num_peaks0 < peak_count_threshold) or (peak_ratio0 > peak_ratio_threshold))
-                cond_cont1 = ((num_peaks1 < peak_count_threshold) or (peak_ratio1 > peak_ratio_threshold))
+                print(np.sum(kmeans_labels == 1) > min_voxels)
+                print(np.sum(kmeans_labels == 0) > min_voxels)
+                print(alteredlips > min_diff_lipids)
+                
 
-                flag = cond_size and cond_diff and enough_sections0 and enough_sections1 and cond_cont0 and cond_cont1
-
+                
+                print("Flag condition evaluated to:", flag)
                 aaa += 1
                 kmeans_labels = data_for_clustering['lab'].astype(int)
-
+            
             if not flag:
+                print("Branch exhausted due to failure of continuity or differential criteria.")
                 return None
-
-            # g) TRAIN XGBOOST CLASSIFIER ON EMBEDDINGS
+        
+            # Train an XGB classifier on the embeddings
             embeddings_df = pd.DataFrame(embspace, index=current_adata.obs_names)
-
+            print("Embeddings dataframe shape:", embeddings_df.shape)
+            
             X_train = embeddings_df.loc[embeddings_df.index.isin(trainpoints), :]
             X_val = embeddings_df.loc[embeddings_df.index.isin(valpoints), :]
             X_test = embeddings_df.loc[embeddings_df.index.isin(testpoints), :]
-
+            print("Training set shape:", X_train.shape)
+            print("Validation set shape:", X_val.shape)
+            print("Test set shape:", X_test.shape)
+            
             kmeans_labels = kmeans_labels - 1
             y_train = kmeans_labels.loc[X_train.index]
             y_val = kmeans_labels.loc[X_val.index]
             y_test = kmeans_labels.loc[X_test.index]
-
+            
             X_train_sub, y_train_sub = self._undersample(X_train, y_train)
-
-            xgb_model = XGBClassifier(
-                n_estimators=xgb_n_estimators,
-                max_depth=xgb_max_depth,
+            print("After undersampling, training set shape:", X_train_sub.shape)
+        
+            xgb_model = XGBClassifier(  
+                n_estimators=xgb_n_estimators, 
+                max_depth=xgb_max_depth, 
                 learning_rate=xgb_learning_rate,
-                subsample=xgb_subsample,
-                colsample_bytree=xgb_colsample_bytree,
-                gamma=xgb_gamma,
-                random_state=xgb_random_state,
-                n_jobs=xgb_n_jobs
+                subsample=xgb_subsample, 
+                colsample_bytree=xgb_colsample_bytree, 
+                gamma=xgb_gamma, 
+                random_state=xgb_random_state,  
+                n_jobs=xgb_n_jobs  
             )
+            print("Training XGB classifier...")
             xgb_model.fit(
                 X_train_sub,
                 y_train_sub,
@@ -711,166 +783,145 @@ class Clustering:
                 early_stopping_rounds=early_stopping_rounds,
                 verbose=False
             )
-
             test_pred = xgb_model.predict(X_test)
             test_acc = accuracy_score(y_test, test_pred)
+            print(f"Test accuracy: {test_acc}")
             if test_acc < ACCTHR:
+                print("Branch exhausted due to poor classifier generalization.")
                 return None
-
-            # h) OVERWRITE CLUSTER LABELS WITH CLASSIFIER PREDICTIONS
-            new_labels = pd.concat([
-                pd.Series(xgb_model.predict(X_train), index=X_train.index),
-                pd.Series(xgb_model.predict(X_val), index=X_val.index),
-                pd.Series(xgb_model.predict(X_test), index=X_test.index)
-            ])
-            new_labels = new_labels.loc[embeddings_df.index] + 1
-
+        
+            # Overwrite cluster labels with classifier predictions (for consistency)
+            new_labels = pd.concat([pd.Series(xgb_model.predict(X_train), index=X_train.index),
+                                     pd.Series(xgb_model.predict(X_val), index=X_val.index),
+                                     pd.Series(xgb_model.predict(X_test), index=X_test.index)])
+            new_labels = new_labels.loc[embeddings_df.index]
+            new_labels = new_labels + 1  # adjust if needed
+            print("New labels distribution:\n", new_labels.value_counts())
+            
+            # Update clustering log
             clusteringLOG.loc[new_labels.index, f"level_{splitlevel+1}"] = new_labels.values
-
-            # i) BUILD NODE AND RECURSE
+            print("Updated clustering log for level", splitlevel+1)
+            
+            # Create a Node for this split
             node = Node(splitlevel, path=path)
             node.scaler = scaler_local
             node.nmf = nmf_model
             node.xgb_model = xgb_model
             node.feature_importances = xgb_model.feature_importances_
             node.factors_to_use = selected_nmf_indices
-
+            print("Created node at level", splitlevel, "with factors:", selected_nmf_indices)
+            
+            # Recursively split the two branches
             idx0 = embeddings_df.index[new_labels == 1]
             idx1 = embeddings_df.index[new_labels == 2]
-
+            print("Branch indices - group 1:", idx0, "\nBranch indices - group 2:", idx1)
             adata0 = current_adata[current_adata.obs_names.isin(idx0)]
             adata1 = current_adata[current_adata.obs_names.isin(idx1)]
-
-            emb_local_df = pd.DataFrame(standardized_embeddings,
-                                        index=current_adata.obs_names)
+            emb_local_df = pd.DataFrame(standardized_embeddings, index=current_adata.obs_names)
             embd0 = emb_local_df.loc[idx0].values
             embd1 = emb_local_df.loc[idx1].values
-
+            print("Recursing on child 0 with", adata0.X.shape[0], "voxels")
             child0 = _dosplit(adata0, embd0, path + [0], splitlevel + 1)
+            print("Recursing on child 1 with", adata1.X.shape[0], "voxels")
             child1 = _dosplit(adata1, embd1, path + [1], splitlevel + 1)
-
             node.children[0] = child0
             node.children[1] = child1
+            print("Completed _dosplit at level", splitlevel)
             return node
-
-        # 5) START RECURSION
-        root_node = _dosplit(
-            self.adatamaia[::ds_factor],
-            self.standardized_embeddings_GLOBAL[::ds_factor].values,
-            path=[],
-            splitlevel=0
-        )
-
-        # 6) SAVE RESULTS
-        clusteringLOG.to_parquet("tree_clustering_euclid.parquet")
-        with open("rootnode_clustering_euclid.pkl", "wb") as f:
+        
+        # Start the recursive clustering from the root
+        print("\n=== Starting recursive clustering ===")
+        root_node = _dosplit(adata[::ds_factor], self.standardized_embeddings_GLOBAL[::ds_factor].values, path=[], splitlevel=0)
+        print("Recursive clustering complete.")
+        
+        # Save the clustering log and tree to file.
+        clusteringLOG.to_parquet("tree_clustering.parquet")
+        with open("rootnode_clustering.pkl", "wb") as f:
             pickle.dump(root_node, f)
-
+        print("Clustering log and root node saved to file.")
+        
         return root_node, clusteringLOG
 
-
-    def apply_euclid_clustering(self, root_node, adata_new, standardized_global_new,
-                                penalty1=1.5, penalty2=2.0, ds_factor=1):
+    def apply_euclid_clustering(self, root_node, adata_new, penalty1=1.5, penalty2=2.0, ds_factor=1):
         """
-        Apply a learned Euclid clustering tree to new data, using precomputed standardized global embeddings.
+        Apply the learned Euclid clustering tree to new data.
 
         Parameters
         ----------
-        (all parameters as before)
+        root_node : Node
+            The root of the learned clustering tree (from learn_euclid_clustering).
+        adata_new : sc.AnnData
+            New AnnData object with raw data in .X. Spatial coordinates are taken from self.coordinates.
+        penalty1 : float, optional
+            Penalty factor used during learning for previous split embeddings.
+        penalty2 : float, optional
+            Penalty factor used during learning for global embeddings.
+        ds_factor : int, optional
+            Downsampling factor (for use if the tree was learned with ds_factor > 1).
 
         Returns
         -------
         paths_df : pd.DataFrame
-            A DataFrame where each row corresponds to an observation in adata_new
-            and each column level_i indicates the cluster assignment at that level.
+            DataFrame of cluster-paths per observation (each column is a split level).
         """
-        standardized_global_new = standardized_global_new.loc[adata_new.obs_names]
+        # Validate inputs
+        if root_node is None:
+            raise ValueError("root_node cannot be None.")
+        if not isinstance(adata_new, anndata.AnnData):
+            raise ValueError("adata_new must be an AnnData object.")
 
-        paths = {obs: [] for obs in adata_new.obs_names}
+        # Prepare global embeddings, downsample if needed
+        glob_emb = self.standardized_embeddings_GLOBAL
+        if ds_factor > 1:
+            glob_emb = glob_emb.iloc[::ds_factor]
+        try:
+            glob_emb = glob_emb.loc[adata_new.obs_names]
+        except KeyError:
+            raise KeyError("New data obs_names do not align with global embeddings index.")
 
-        def traverse_tree(node, current_adata, embds_local, level=0):
+        # Initialize path dictionary
+        paths = {idx: [] for idx in adata_new.obs_names}
+
+        def _traverse(node, adata_sub, emb_prev):
+            # Stop at leaves
             if node is None or not node.children:
                 return
-            if current_adata.shape[0] == 0:
-                return
 
-            # 1) Apply stored NMF
-            nmf_model = node.nmf
-            X_nmf = nmf_model.transform(current_adata.X)
+            # Apply stored NMF and scaler
+            X_nmf = node.nmf.transform(adata_sub.X)
+            X_nmf = X_nmf[:, node.factors_to_use]
+            X_scaled = node.scaler.transform(X_nmf)
 
-            # 2) Select factors
-            factors_to_use = node.factors_to_use
-            X_nmf_sel = X_nmf[:, factors_to_use]
+            # Combine with previous and global embeddings
+            emb_prev_scaled = emb_prev / penalty1
+            emb_glob = glob_emb.loc[adata_sub.obs_names].values / penalty2
+            embspace = np.concatenate((X_scaled, emb_prev_scaled, emb_glob), axis=1)
 
-            # 3) Scale with stored scaler
-            scaler_local = node.scaler
-            X_scaled = scaler_local.transform(X_nmf_sel)
+            # Predict split labels
+            labels = node.xgb_model.predict(embspace)
 
-            # 4) Global embeddings for subset
-            glob_emb_subset = standardized_global_new.loc[current_adata.obs_names].values / penalty2
+            # Record labels into path
+            for idx, lab in zip(adata_sub.obs_names, labels):
+                paths[idx].append(lab)
 
-            # 5) Combine embeddings
-            embspace = np.concatenate(
-                (X_scaled,
-                 embds_local / penalty1,
-                 glob_emb_subset),
-                axis=1
-            )
+            # Recurse into each child branch
+            for child_label, child_node in node.children.items():
+                mask = labels == child_label
+                if mask.any():
+                    adata_child = adata_sub[mask]
+                    _traverse(child_node, adata_child, X_scaled[mask])
 
-            # 6) Predict child labels
-            xgb_model = node.xgb_model
-            child_labels = xgb_model.predict(embspace)
-            child_labels_adjusted = child_labels + 1
+        # Start traversal with empty previous embedding
+        empty_prev = np.zeros((adata_new.n_obs, 0))
+        _traverse(root_node, adata_new, empty_prev)
 
-            # 7) Record labels
-            for i, obs in enumerate(current_adata.obs_names):
-                paths[obs].append(int(child_labels_adjusted[i]))
+        # Build DataFrame of paths
+        paths_df = pd.DataFrame.from_dict(paths, orient='index')
+        paths_df.columns = [f'level_{i+1}' for i in range(paths_df.shape[1])]
 
-            # 8) Split into children
-            mask_child0 = (child_labels == 0)
-            mask_child1 = (child_labels == 1)
-
-            obs_child0 = current_adata.obs_names[mask_child0]
-            obs_child1 = current_adata.obs_names[mask_child1]
-
-            adata_child0 = current_adata[current_adata.obs_names.isin(obs_child0)]
-            adata_child1 = current_adata[current_adata.obs_names.isin(obs_child1)]
-
-            # 9) Prepare embeddings for next
-            emb0 = X_scaled[mask_child0]
-            emb1 = X_scaled[mask_child1]
-
-            # 10) Recurse
-            traverse_tree(node.children[0], adata_child0, emb0, level + 1)
-            traverse_tree(node.children[1], adata_child1, emb1, level + 1)
-
-        if ds_factor > 1:
-            adata_to_apply = adata_new[::ds_factor]
-            global_to_apply = standardized_global_new.loc[adata_to_apply.obs_names]
-        else:
-            adata_to_apply = adata_new
-            global_to_apply = standardized_global_new
-
-        emb_initial = global_to_apply.values
-        traverse_tree(root_node, adata_to_apply, emb_initial, level=0)
-
-        max_depth_observed = max(len(p) for p in paths.values()) if paths else 0
-        columns = [f"level_{i+1}" for i in range(max_depth_observed)]
-        paths_df = pd.DataFrame(index=adata_to_apply.obs_names, columns=columns, dtype=float)
-
-        for obs, path in paths.items():
-            padded = path + [np.nan] * (max_depth_observed - len(path))
-            paths_df.loc[obs, :] = padded
-
-        for i, col in enumerate(columns):
-            adata_new.obs[col] = np.nan
-            adata_new.obs.loc[paths_df.index, col] = paths_df[col].values
-
-        print("ciao")
+        # Merge into adata_new.obs
+        adata_new.obs = adata_new.obs.join(paths_df)
         return paths_df
-
-
-
 
 
     

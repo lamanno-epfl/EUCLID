@@ -2,10 +2,12 @@ LICENSE
 README.md
 pyproject.toml
 src/euclid_msi/__init__.py
+src/euclid_msi/backSPIN.py
 src/euclid_msi/case_control.py
 src/euclid_msi/clustering.py
 src/euclid_msi/embedding.py
 src/euclid_msi/plotting.py
+src/euclid_msi/plottingtmp.py
 src/euclid_msi/postprocessing.py
 src/euclid_msi/preprocessing.py
 src/euclid_msi.egg-info/PKG-INFO
