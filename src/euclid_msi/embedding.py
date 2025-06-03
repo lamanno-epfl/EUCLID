@@ -39,6 +39,7 @@ class Embedding():
             self.data_df = pd.DataFrame(prep.adata.X, 
                                       index=prep.adata.obs_names, 
                                       columns=prep.adata.var_names).fillna(0.0001)
+            
 
     def learn_seeded_nmf_embeddings(
         self,

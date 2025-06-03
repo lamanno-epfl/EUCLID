@@ -714,8 +714,12 @@ class Preprocessing:
     
         # Save the scores table to a CSV file.
         scores_df.to_csv(output_csv)
-        
+        peaks = self.adata.X.copy()
+        peak_names = self.adata.var.index.copy().tolist()
+
         self.adata = feature_selected_adata
+        self.adata.obsm['peaks'] = peaks
+        self.adata.uns['peak_names'] = peak_names
     
     
     def _rank_features_by_combined_score(self, temp_adata):

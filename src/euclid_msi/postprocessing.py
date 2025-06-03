@@ -137,7 +137,11 @@ class Postprocessing:
         except:
             self.embeddings = emb.adata.obsm['X_NMF']
         self.morans = morans
-        self.alldata = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var['old_feature_names'].values)
+        self.alldata = pd.DataFrame(
+            self.adata.obsm['peaks'], 
+            index=self.adata.obs.index,
+            columns=self.adata.uns['peak_names']
+        )
         self.pixels = self.adata.obs.copy()
         self.coordinates = self.pixels[['SectionID', 'x', 'y']]
         self.reference_image = reference_image
@@ -262,10 +266,14 @@ class Postprocessing:
         )
         # Keep only rows where the sum is above `usage_sum_threshold`
         usage_dataframe = usage_dataframe.loc[usage_dataframe.sum(axis=1) > usage_sum_threshold, :]
+        
+        usage_dataframe = usage_dataframe.iloc[:2,:] ############################
+        print(usage_dataframe)
     
         # Select corresponding lipids to restore
         lipids_to_restore = lipids_to_restore.loc[:, lipids_to_restore.columns.isin(usage_dataframe.index.astype(float).astype(str))]
         lipids_to_restore["SectionID"] = self.pixels["SectionID"]
+        lipids_to_restore.columns = lipids_to_restore.columns.astype(str)
     
         # Coordinates
         coords = self.coordinates.copy()
@@ -273,13 +281,11 @@ class Postprocessing:
     
         metrics_df = pd.DataFrame(columns=["train_pearson_r", "train_rmse", "val_pearson_r", "val_rmse"])
     
-    
-        print(usage_dataframe.index.astype(str))
-        print(lipids_to_restore.columns.astype(str))
-        print(np.intersect1d(usage_dataframe.index.astype(str), lipids_to_restore.index.astype(str)))
-    
         # 3) Loop over features in usage_dataframe to train a model for each
         for index, row in tqdm(usage_dataframe.iterrows(), total=usage_dataframe.shape[0], desc="XGB Restoration"):
+            
+            print(index)
+            
             # For each lipid feature index, gather sections that are True in usage_dataframe
             train_sections_all = row[row].index.tolist()
             if len(train_sections_all) < min_sections_for_training:
@@ -296,13 +302,12 @@ class Postprocessing:
             # Gather train data
             train_data = self.embeddings.loc[coords["SectionID"].astype(int).isin(train_sections), :]
             
-            print(lipids_to_restore)
             column_key = str(float(index))
             y_train = lipids_to_restore.loc[train_data.index, column_key]
            
             # Gather val data
-            val_data = self.embeddings.loc[coords["SectionID"].astype(int).isin([val_section]), :] #################
-            y_val = lipids_to_restore.loc[val_data.index, index]
+            val_data = self.embeddings.loc[coords["SectionID"].astype(int).isin([val_section]), :] 
+            y_val = lipids_to_restore.loc[val_data.index, column_key]
     
             # 4) Train XGBoost model
             model_kwargs = xgb_params if xgb_params is not None else {}
