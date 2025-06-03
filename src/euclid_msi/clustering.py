@@ -877,7 +877,7 @@ class Clustering:
     # -------------------------------------------------------------------------
     # BLOCK 3: Assign colors to clusters based on spatial embedding (for visualization)
     # -------------------------------------------------------------------------
-    def assign_cluster_colors(self, tree, coordinates):
+    def assign_cluster_colors(self, tree):
         """
         Compute a color assignment for lipizones (clusters) based on spatial distribution.
         
@@ -893,7 +893,7 @@ class Clustering:
         lipizone_colors : pd.Series
             A Series mapping each observation to a hex color.
         """
-        coords = coordinates.fillna(0).replace([np.inf, -np.inf], 0) ##########################
+        coords = self.coordinates.fillna(0).replace([np.inf, -np.inf], 0) ##########################
         xs = (coords['xccf']*40).astype(int)
         ys = (coords['yccf']*40).astype(int)
         zs = (coords['zccf']*40).astype(int)
@@ -906,7 +906,7 @@ class Clustering:
         data_std = pd.DataFrame(data_std, index=self.adata.obs_names, columns=self.adata.var_names)
         
         # Normalize the data per pixel
-        levels = pd.concat([data_std, coordinates.loc[self.adata.obs_names]], axis=1)
+        levels = pd.concat([data_std, self.coordinates.loc[self.adata.obs_names]], axis=1)
         levels = pd.concat([levels, tree], axis=1)
         dd2 = levels.copy()
         
@@ -999,8 +999,8 @@ class Clustering:
                 return np.nan
         
         dd2['lipizone_color'] = dd2.apply(lambda row: rgb_to_hex(row['R'], row['G'], row['B']), axis=1)
-        dd2['lipizone_color'].fillna('gray', inplace=True)
-        return dd2['lipizone_color']
+        
+        self.adata.obs['lipizone_color'] = dd2['lipizone_color'].values
     
 
 

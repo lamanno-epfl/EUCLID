@@ -10,7 +10,7 @@ dynamic grid layouts for multi-section plots, filtering by metadata, and hierarc
   
 Expected AnnData structure example:
     obs: 'SectionID', 'x', 'y', 'Path', 'Sample', 'Sex', 'Condition', 'Section', 'BadSection',
-         'X_Leiden', 'X_Euclid', 'lipizone_colors', 'allen_division', 'border', 'acronym', etc.
+         'X_Leiden', 'X_Euclid', 'lipizone_colors', 'allen_division', 'boundary', 'acronym', etc.
     uns: 'feature_selection_scores', 'neighbors'
     obsm: 'X_NMF', 'X_Harmonized', 'X_approximated', 'X_TSNE', 'X_restored'
     obsp: 'distances', 'connectivities'
@@ -55,9 +55,9 @@ class Plotting:
     extra_data : dict, optional
         Additional data (e.g. feature selection scores) stored in adata.uns or elsewhere.
     """
-    def __init__(self, adata, coordinates, extra_data=None):
+    def __init__(self, adata, extra_data=None):
         self.adata = adata
-        self.coordinates = coordinates
+        self.coordinates = self.adata.obs[['Section', 'xccf', 'yccf', 'zccf']]
         self.extra_data = extra_data if extra_data is not None else {}
 
     @staticmethod
@@ -81,45 +81,8 @@ class Plotting:
         else:
             return lipid_name.split()[0]
 
-    def prepare_lipid_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process a DataFrame with a 'lipid_name' column to extract lipid class,
-        number of carbons, insaturations, and to map colors from an external file.
-        
-        Parameters
-        ----------
-        df : pd.DataFrame
-            DataFrame that includes a column 'lipid_name'.
-        
-        Returns
-        -------
-        pd.DataFrame
-            Updated DataFrame with additional columns.
-        """
-        df = df.copy()
-        df["class"] = df["lipid_name"].apply(self.extract_class)
-        df["carbons"] = df["lipid_name"].apply(
-            lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
-        )
-        df["insaturations"] = df["lipid_name"].apply(
-            lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
-        )
-        df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
-        df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
-        df["broken"] = df["lipid_name"].str.endswith('_uncertain')
-        df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
-        try:
-            colors_df = pd.read_hdf("lipidclasscolors.h5ad", key="table")
-            color_dict = colors_df["classcolors"].to_dict()
-        except Exception:
-            color_dict = {}
-        df['color'] = df['class'].map(color_dict).fillna("black")
-        df.index = df["lipid_name"]
-        df = df.drop_duplicates()
-        return df
-
-    def plot_lipid_class_pie(self, lipid_df: pd.DataFrame, class_column: str = "class",
-                             show_inline: bool = False) -> None:
+    def plot_lipid_class_pie(self, lipid_df,
+                             show_inline: bool = True) -> None:
         """
         Plot a pie chart showing the distribution of lipid classes.
         
@@ -132,9 +95,9 @@ class Plotting:
         show_inline : bool, optional
             If True, display the plot inline.
         """
-        class_counts = lipid_df[class_column].value_counts()
-        palette = sns.color_palette("pastel", len(class_counts))
-        color_dict = dict(zip(class_counts.index, palette))
+        lipid_df["color"] = lipid_df["color"].fillna("black")
+        class_counts = lipid_df["class"].value_counts()
+        color_dict = lipid_df.drop_duplicates("class").set_index("class")["color"].to_dict()
         plt.figure(figsize=(8, 8))
         ax = class_counts.plot.pie(colors=[color_dict.get(cls, "black") for cls in class_counts.index],
                                    autopct='%1.1f%%', startangle=90, textprops={'fontsize': 10})
@@ -147,57 +110,10 @@ class Plotting:
         else:
             plt.close()
 
-    def plot_moran_by_class(self, annowmoran: pd.DataFrame, show_inline: bool = False) -> None:
-        """
-        Plot a boxplot (with an overlaid stripplot) of mean Moran's I by lipid class.
-        
-        Parameters
-        ----------
-        annowmoran : pd.DataFrame
-            DataFrame with columns 'lipid_name', 'quant' (mean Moran's I), etc.
-        show_inline : bool, optional
-            If True, display the plot inline.
-        """
-        df = annowmoran.copy()
-        df["class"] = df["lipid_name"].apply(self.extract_class)
-        df["carbons"] = df["lipid_name"].apply(
-            lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
-        )
-        df["insaturations"] = df["lipid_name"].apply(
-            lambda x: int(re.search(r':(\d+)', x).group(1)) if re.search(r':(\d+)', x) else np.nan
-        )
-        df["insaturations_per_Catom"] = df["insaturations"] / df["carbons"]
-        df.loc[df['class'] == "HexCer", 'class'] = "Hex1Cer"
-        df["broken"] = df["lipid_name"].str.endswith('_uncertain')
-        df.loc[df["broken"], ['carbons', 'class', 'insaturations', 'insaturations_per_Catom']] = np.nan
-        try:
-            colors_df = pd.read_hdf("lipidclasscolors.h5ad", key="table")
-            color_dict = colors_df["classcolors"].to_dict()
-        except Exception:
-            color_dict = {}
-        df['color'] = df['class'].map(color_dict).fillna("black")
-        df.index = df["lipid_name"]
-        df = df.drop_duplicates()
-        order = df.groupby("class")["quant"].median().sort_values().index.tolist()
-        plt.figure(figsize=(12, 8))
-        ax = sns.boxplot(data=df, x="class", y="quant", order=order, palette=color_dict, showfliers=False)
-        sns.stripplot(data=df, x="class", y="quant", order=order, color="black", alpha=0.5, size=3)
-        ax.axhline(y=0.4, color="darkred", linestyle="--")
-        ax.set_ylim(0, 1)
-        sns.despine(ax=ax)
-        ax.set_xlabel("Lipid Class")
-        ax.set_ylabel("Mean Moran's I")
-        ax.set_title("Spatial Evaluation by Mean Moran's I")
-        save_path = os.path.join(PLOTS_DIR, "moranbyclass.pdf")
-        plt.tight_layout()
-        plt.savefig(save_path)
-        if show_inline:
-            plt.show()
-        else:
-            plt.close()
+    #def plot_moran_by_class(self, annowmoran: pd.DataFrame, show_inline: bool = True) -> None:
+ 
 
     def plot_lipid_distribution(self,
-                                  data: pd.DataFrame,
                                   lipid: str,
                                   section_filter: list = None,
                                   metadata_filter: dict = None,
@@ -206,10 +122,10 @@ class Plotting:
                                   y_range: tuple = None,
                                   z_range: tuple = None,
                                   layout: tuple = None,
-                                  point_size: float = 5,
+                                  point_size: float = 0.5,
                                   show_contours: bool = True,
-                                  contour_column: str = "border",
-                                  show_inline: bool = False) -> None:
+                                  contour_column: str = "boundary",
+                                  show_inline: bool = True) -> None:
         """
         Plot the spatial distribution of a given lipid with extensive filtering and cropping options.
         
@@ -246,6 +162,16 @@ class Plotting:
         show_inline : bool, optional
             If True, display plot inline.
         """
+        
+        coords = self.adata.obs[["zccf", "yccf", "xccf", "Section", "division", "boundary"]].copy()
+        lipid_idx = list(self.adata.var_names).index(lipid)
+
+        lipid_values = self.adata.X[:, lipid_idx].flatten() 
+        
+        df_lipid = pd.DataFrame({lipid: lipid_values}, index=coords.index)
+
+        data = pd.concat([coords, df_lipid], axis=1).reset_index(drop=True)
+        
         df = data.copy()
         if metadata_filter:
             for col, accepted in metadata_filter.items():
@@ -307,6 +233,13 @@ class Plotting:
                            c="black", s=point_size/2, alpha=0.5, rasterized=True)
         for j in range(idx+1, len(axes)):
             fig.delaxes(axes[j])
+            
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        sm = ScalarMappable(norm=Normalize(vmin=med2p, vmax=med98p), cmap="plasma")
+        sm.set_array([])
+        fig.colorbar(sm, ax=axes.tolist(), fraction=0.02, pad=0.04)
+        
         plt.tight_layout()
         save_path = os.path.join(PLOTS_DIR, f"{lipid}_distribution.pdf")
         plt.savefig(save_path)
@@ -316,63 +249,131 @@ class Plotting:
             plt.close()
 
     def plot_embeddings(self,
-                        currentProgram: str = 'headgroup_with_negative_charge',
+                        key: str = "X_Harmonized",
+                        currentProgram: int = 0,
                         layout: tuple = (4, 8),
                         point_size: float = 0.5,
                         cmap_name: str = "PuOr",
-                        show_inline: bool = False) -> None:
+                        show_inline: bool = True) -> None:
         """
-        Plot spatial embeddings using the same strategy as for lipids.
-        
-        For each section (1 to 32), compute the 2nd and 98th percentiles for the specified
-        program (a column in data), take the median of these percentiles across sections, and plot.
-        
+        Plot spatial embeddings from adata.obsm[key], coloring by the chosen embedding‐column index.
+
+        For each section (as found in adata.obs["Section"]), compute that section’s
+        2nd and 98th percentile of embedding‐column `currentProgram`. Then take the
+        median across all sections to fix vmin/vmax. Plot each section in its own subplot.
+
         Parameters
         ----------
-        currentProgram : str, optional
-            The column in self.adata.obs (or provided data) to use for coloring.
+        key : str, optional
+            Key into adata.obsm where the embeddings array lives.
+        currentProgram : int, optional
+            Integer index of the embedding‐column (i.e. adata.obsm[key][:, currentProgram]).
         layout : tuple, optional
-            Grid layout (nrows, ncols) for the subplots. Default is (4, 8).
+            (nrows, ncols) for the subplot grid. E.g. (1, 3) to get three side-by-side panels.
         point_size : float, optional
-            Marker size.
+            Marker size for the scatter.
         cmap_name : str, optional
-            Name of the colormap.
+            A matplotlib colormap name.
         show_inline : bool, optional
-            Whether to display the plot inline.
+            If True, calls plt.show(); otherwise closes after saving.
         """
-        # Assume that self.adata.obs contains columns 'Section', 'zccf', 'yccf',
-        # and a column named currentProgram.
-        data = self.adata.obs.copy()
-        # Prepare results from each section.
-        results = []
-        for sec in data["Section"].unique():
-            subset = data[data["Section"] == sec]
-            perc2 = subset[currentProgram].quantile(0.02)
-            perc98 = subset[currentProgram].quantile(0.98)
-            results.append([sec, perc2, perc98])
-        percentile_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
-        med2p = percentile_df["2-perc"].median()
-        med98p = percentile_df["98-perc"].median()
-        cmap = plt.get_cmap(cmap_name)
-        n_sections = 32  # as in original (sections 1 to 32)
+        # 1) Sanity checks
+        data = self.adata.obs
+        if "Section" not in data.columns:
+            raise ValueError("`adata.obs` must contain a 'Section' column.")
+        if key not in self.adata.obsm:
+            raise ValueError(f"Key '{key}' not found in adata.obsm.")
+        
+        embeddings = self.adata.obsm[key]
+        if not isinstance(embeddings, np.ndarray):
+            raise ValueError(f"adata.obsm['{key}'] must be a NumPy array (got {type(embeddings)}).")
+        
+        n_cells, n_dims = embeddings.shape
+        if not (0 <= currentProgram < n_dims):
+            raise IndexError(f"currentProgram={currentProgram} is out of bounds for embeddings with {n_dims} columns.")
+        
+        # 2) Decide which sections to plot
+        sections = sorted(data["Section"].unique())
+        n_plots   = len(sections)
         nrows, ncols = layout
-        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.5, nrows * 2.5))
+        total_axes = nrows * ncols
+        
+        if n_plots > total_axes:
+            raise ValueError(
+                f"You requested layout={layout}, which has {total_axes} subplots, "
+                f"but your data contains {n_plots} distinct sections. "
+                "Please increase nrows/ncols so that nrows*ncols ≥ number_of_sections."
+            )
+        
+        # 3) Compute 2nd/98th percentile for each section’s embedding‐column
+        results = []
+        for sec in sections:
+            mask = (data["Section"] == sec).to_numpy()
+            if np.count_nonzero(mask) < 2:
+                # skip if fewer than 2 cells in that section
+                continue
+            vals = embeddings[mask, currentProgram]
+            p2  = np.quantile(vals, 0.02)
+            p98 = np.quantile(vals, 0.98)
+            results.append((sec, p2, p98))
+        
+        if len(results) == 0:
+            raise RuntimeError("No section had ≥2 cells to compute percentiles.")
+        
+        pct_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
+        med2p  = pct_df["2-perc"].median()
+        med98p = pct_df["98-perc"].median()
+        
+        # 4) Create the figure & axes
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(ncols * 2.5, nrows * 2.5),
+                                 squeeze=False)
         axes = axes.flatten()
-        for sec in range(1, n_sections+1):
-            ax = axes[sec - 1]
-            ddf = data[data["Section"] == sec]
-            ax.scatter(ddf["zccf"], -ddf["yccf"],
-                       c=ddf[currentProgram], cmap=cmap, s=point_size,
-                       rasterized=True, vmin=med2p, vmax=med98p)
-            ax.axis("off")
+        cmap = plt.get_cmap(cmap_name)
+        
+        # 5) Plot each section in its own subplot
+        for idx, sec in enumerate(sections):
+            ax   = axes[idx]
+            mask = (data["Section"] == sec).to_numpy()
+            
+            # If no cells in this section, just turn off axis
+            if not mask.any():
+                ax.axis("off")
+                continue
+            
+            coords  = data.loc[mask, ["zccf", "yccf"]]
+            emb_vals = embeddings[mask, currentProgram]
+            
+            ax.scatter(
+                coords["zccf"],
+                -coords["yccf"],
+                c=emb_vals,
+                cmap=cmap,
+                s=point_size,
+                rasterized=True,
+                vmin=med2p,
+                vmax=med98p
+            )
             ax.set_aspect("equal")
+            ax.axis("off")
+        
+        # 6) Turn off any leftover axes (if layout > number of sections)
+        for leftover in range(n_plots, total_axes):
+            axes[leftover].axis("off")
+        
+        # 7) Add a colorbar on the right
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = Normalize(vmin=med2p, vmax=med98p)
-        sm = ScalarMappable(norm=norm, cmap=cmap)
+        sm   = ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])  # Required for colorbar compatibility
         fig.colorbar(sm, cax=cbar_ax)
+        
         plt.tight_layout(rect=[0, 0, 0.9, 1])
+        
+        # 8) Save + show/close
         save_path = os.path.join(PLOTS_DIR, f"{currentProgram}_embeddings.pdf")
         plt.savefig(save_path)
+        
         if show_inline:
             plt.show()
         else:
@@ -382,7 +383,7 @@ class Plotting:
                        lipizone_col: str = "lipizone_names",
                        section_col: str = "Section",
                        level_filter: str = None,
-                       show_inline: bool = False) -> None:
+                       show_inline: bool = True) -> None:
         """
         Plot lipizones (clusters) with flexible options.
         
@@ -453,39 +454,225 @@ class Plotting:
         else:
             plt.close()
 
-    def plot_tsne(self, tsne: np.ndarray, color_column: str = "lipizone_color",
-                  show_inline: bool = False) -> None:
+    def plot_tsne(self,
+                  attribute: str = None,
+                  attribute_type: str = "lipid",
+                  tsne_key: str = "X_TSNE",
+                  program_key: str = None,
+                  program_index: int = 0,
+                  cmap: str = "plasma",
+                  point_size: float = 0.5,
+                  show_inline: bool = True):
         """
-        Plot a TSNE scatter plot with coloring from a metadata column.
-        
+        t-SNE scatter plot colored by any of:
+          - a lipid (continuous; column of adata.X),
+          - a peak (continuous; either var_names or a column of an obsm array),
+          - a program (continuous; one column of an embedding in adata.obsm),
+          - a categorical metadata (discrete; adata.obs[column]),
+          - or a direct color column (hex codes or named colors; adata.obs[column], e.g. 'lipizone_color').
+
         Parameters
         ----------
-        tsne : np.ndarray
-            2D array of TSNE coordinates.
-        color_column : str, optional
-            Column in adata.obs to use for color.
+        attribute : str, optional
+            Name of the feature to color by:
+              • If attribute_type=="lipid", must be in adata.var_names.
+              • If attribute_type=="peak", either in adata.var_names or a key in adata.obsm.
+              • If attribute_type=="program", attribute is ignored; use program_key & program_index.
+              • If attribute_type=="categorical" or "color", must be a column in adata.obs.
+        attribute_type : str, optional
+            One of {"lipid", "peak", "program", "categorical", "color"}.  Defaults to "lipid".
+        tsne_key : str, optional
+            Key in adata.obsm where your 2D t-SNE coordinates live (default "X_TSNE").
+        program_key : str, optional
+            If attribute_type=="program", this is the obsm key for the embedding (e.g. "X_Harmonized").
+        program_index : int, optional
+            Column index within the embedding when attribute_type=="program" or ("peak" via obsm).
+        cmap : str, optional
+            A matplotlib colormap name for continuous or categorical mapping.
+        point_size : float, optional
+            Marker size for each cell.
         show_inline : bool, optional
-            Whether to display inline.
+            If True, calls plt.show(); otherwise saves and closes.
         """
-        df = self.adata.obs.copy()
-        if color_column not in df.columns:
-            print(f"Warning: {color_column} not found in adata.obs; using gray.")
-            colors = "gray"
+        # 1) Retrieve t-SNE coordinates
+        if tsne_key not in self.adata.obsm:
+            raise ValueError(f"`{tsne_key}` not found in adata.obsm; cannot plot t-SNE.")
+        tsne_coords = self.adata.obsm[tsne_key]
+        if tsne_coords.shape[1] < 2:
+            raise ValueError(f"adata.obsm['{tsne_key}'] must have at least 2 dimensions.")
+        xs, ys = tsne_coords[:, 0], tsne_coords[:, 1]
+
+        # 2) Build the color array based on attribute_type
+        color_array = None
+        vmin = vmax = None
+        legend_handles = None
+
+        # Continuous: lipid
+        if attribute_type == "lipid":
+            if attribute not in self.adata.var_names:
+                raise ValueError(f"Lipid '{attribute}' not found in adata.var_names.")
+            var_idx = list(self.adata.var_names).index(attribute)
+            vals = self.adata.X[:, var_idx]
+            # If sparse matrix, convert that one column to dense
+            values = vals.A.flatten() if hasattr(vals, "A") else vals
+            color_array = values
+            # Clip at 2nd/98th percentiles
+            p2, p98 = np.percentile(color_array, [2, 98])
+            vmin, vmax = p2, p98
+
+        # Continuous: peak
+        elif attribute_type == "peak":
+            # (a) if attribute is in var_names
+            if attribute in self.adata.var_names:
+                var_idx = list(self.adata.var_names).index(attribute)
+                vals = self.adata.X[:, var_idx]
+                values = vals.A.flatten() if hasattr(vals, "A") else vals
+                color_array = values
+                p2, p98 = np.percentile(color_array, [2, 98])
+                vmin, vmax = p2, p98
+            # (b) else if attribute is a key in obsm
+            elif attribute in self.adata.obsm:
+                mat = self.adata.obsm[attribute]
+                if not isinstance(mat, np.ndarray):
+                    raise ValueError(f"adata.obsm['{attribute}'] must be a NumPy array.")
+                if program_index < 0 or program_index >= mat.shape[1]:
+                    raise IndexError(
+                        f"program_index={program_index} out of bounds for obsm['{attribute}'].shape={mat.shape}."
+                    )
+                color_array = mat[:, program_index]
+                p2, p98 = np.percentile(color_array, [2, 98])
+                vmin, vmax = p2, p98
+            else:
+                raise ValueError(
+                    f"'{attribute}' not found in adata.var_names or adata.obsm for peaks."
+                )
+
+        # Continuous: program
+        elif attribute_type == "program":
+            if program_key is None:
+                raise ValueError("When attribute_type=='program', you must specify program_key.")
+            if program_key not in self.adata.obsm:
+                raise ValueError(f"'{program_key}' not found in adata.obsm.")
+            emb = self.adata.obsm[program_key]
+            if not isinstance(emb, np.ndarray):
+                raise ValueError(f"adata.obsm['{program_key}'] must be a NumPy array.")
+            n_dims = emb.shape[1]
+            if program_index < 0 or program_index >= n_dims:
+                raise IndexError(f"program_index={program_index} out of bounds for shape {emb.shape}.")
+            color_array = emb[:, program_index]
+            p2, p98 = np.percentile(color_array, [2, 98])
+            vmin, vmax = p2, p98
+
+        # Discrete: categorical metadata
+        elif attribute_type == "categorical":
+            if attribute not in self.adata.obs.columns:
+                raise ValueError(f"Categorical column '{attribute}' not found in adata.obs.")
+            series = self.adata.obs[attribute].astype(str)
+            # Check if column holds valid color strings (hex or names)
+            from matplotlib.colors import is_color_like
+            all_colors = series.dropna().unique()
+            if all(is_color_like(c) for c in all_colors):
+                # Treat as direct color column
+                color_array = series.values
+                # No legend for this branch (colors are explicit)
+            else:
+                # Map each category to a numeric index + discrete cmap + legend
+                cats = series.values
+                uniq = np.unique(cats)
+                lut = {u: i for i, u in enumerate(uniq)}
+                numeric = np.array([lut[c] for c in cats])
+                color_array = numeric
+                # Build discrete colormap
+                n_colors = len(uniq)
+                cmap_obj = mpl.cm.get_cmap(cmap, n_colors)
+                # Build legend handles
+                handles = []
+                for i, u in enumerate(uniq):
+                    patch = mpl.patches.Patch(color=cmap_obj(i), label=u)
+                    handles.append(patch)
+                legend_handles = handles
+                cmap = cmap_obj
+
+        # Direct: hex/color column
+        elif attribute_type == "color":
+            if attribute not in self.adata.obs.columns:
+                raise ValueError(f"Color column '{attribute}' not found in adata.obs.")
+            series = self.adata.obs[attribute].astype(str)
+            from matplotlib.colors import is_color_like
+            all_colors = series.dropna().unique()
+            if not all(is_color_like(c) for c in all_colors):
+                raise ValueError(f"Not all values in '{attribute}' are valid colors.")
+            color_array = series.values
+            # No colormap, no vmin/vmax
+
         else:
-            colors = df[color_column]
-        plt.figure(figsize=(8, 6))
-        plt.scatter(tsne[:, 0], tsne[:, 1], c=colors, s=0.5, alpha=0.9, rasterized=True)
-        plt.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False,
-                        labelbottom=False, labelleft=False)
-        for spine in plt.gca().spines.values():
-            spine.set_visible(False)
-        save_path = os.path.join(PLOTS_DIR, "tsne.pdf")
+            raise ValueError("attribute_type must be one of 'lipid', 'peak', 'program', 'categorical', or 'color'.")
+
+        # 3) Scatter plot
+        plt.figure(figsize=(6, 6))
+        sc_kwargs = {"s": point_size, "alpha": 0.8, "rasterized": True}
+
+        if attribute_type in {"lipid", "peak", "program"}:
+            sc_kwargs["c"] = color_array
+            sc_kwargs["cmap"] = cmap
+            sc_kwargs["vmin"] = vmin
+            sc_kwargs["vmax"] = vmax
+        else:
+            # categorical or color: c is directly the array of strings or numeric + discrete cmap
+            sc_kwargs["c"] = color_array
+            if legend_handles is None:
+                # direct hex/named colors → no cmap
+                pass
+            else:
+                sc_kwargs["cmap"] = cmap
+
+        plt.scatter(xs, ys, **sc_kwargs)
+        plt.axis("off")
+        plt.gca().set_aspect("equal")
+
+        # 4) Colorbar or legend
+        if attribute_type in {"lipid", "peak", "program"}:
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            ax = plt.gca()
+
+            # (2) create the ScalarMappable
+            sm = ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap=cmap)
+            sm.set_array([])
+
+            # (3) attach the colorbar to that Axes
+            cbar = ax.figure.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            
+            if attribute_type == "lipid":
+                cbar.set_label(attribute, rotation=270, labelpad=15)
+            elif attribute_type == "peak":
+                cbar.set_label(f"Peak '{attribute}'", rotation=270, labelpad=15)
+            else:
+                cbar.set_label(f"{program_key}[..., {program_index}]", rotation=270, labelpad=15)
+
+        elif legend_handles is not None:
+            plt.legend(handles=legend_handles, title=attribute, loc="right", bbox_to_anchor=(1.3, 0.5))
+
+        # 5) Save + show or close
+        if attribute_type == "lipid":
+            fname = f"tsne_lipid_{attribute.replace(' ', '_')}"
+        elif attribute_type == "peak":
+            fname = f"tsne_peak_{attribute.replace(' ', '_')}"
+        elif attribute_type == "program":
+            fname = f"tsne_program_{program_key}_{program_index}"
+        elif attribute_type == "categorical":
+            fname = f"tsne_cat_{attribute}"
+        else:  # color
+            fname = f"tsne_colorcol_{attribute}"
+        save_path = os.path.join(PLOTS_DIR, f"{fname}.pdf")
         plt.tight_layout()
         plt.savefig(save_path)
+
         if show_inline:
             plt.show()
         else:
             plt.close()
+
 
     def plot_sorted_heatmap(self, data: pd.DataFrame, vmin: float = None, vmax: float = None,
                             xticklabels: bool = False, yticklabels: bool = False,
