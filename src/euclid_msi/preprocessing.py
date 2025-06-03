@@ -415,7 +415,7 @@ class Preprocessing:
 
     def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
         self,
-        filename="msi_dataset.h5ad"
+        filename="prep_msi_dataset.h5ad"
     ) -> sc.AnnData:
         """
         Load an AnnData object from disk.
@@ -432,8 +432,6 @@ class Preprocessing:
         """
         adata = sc.read_h5ad(filename)
         self.adata = adata
-        return adata
-
 
     def prioritize_adducts(
         self,
@@ -869,7 +867,8 @@ class Preprocessing:
 
         # Subset AnnData to only kept features
         self.adata = self.adata[:, keep_vars].copy()
-
+        self.adata.var['old_feature_names'] = self.adata.var_names
+        
         # Ensure unique names: append suffix to duplicates
         counts = Counter(new_names)
         dup_counters = {n:0 for n,c in counts.items() if c>1 and n is not None}

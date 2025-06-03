@@ -109,7 +109,7 @@ class Postprocessing:
     
     Operates on the AnnData object (and related data) produced by the embedding pipeline.
     """
-    def __init__(self, adata, embeddings, morans, alldata, pixels, 
+    def __init__(self, emb, morans, 
                  reference_image=None, annotation_image=None):
         """
         Parameters
@@ -131,11 +131,14 @@ class Postprocessing:
         annotation_image : np.ndarray, optional
             3D anatomical annotation image.
         """
-        self.adata = adata
-        self.embeddings = embeddings
+        self.adata = emb.adata
+        try:
+            self.embeddings = emb.adata.obsm['X_Harmonized']
+        except:
+            self.embeddings = emb.adata.obsm['X_NMF']
         self.morans = morans
-        self.alldata = alldata
-        self.pixels = pixels
+        self.alldata = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var['old_feature_names'].values)
+        self.pixels = self.adata.obs.copy()
         self.coordinates = self.pixels[['SectionID', 'x', 'y']]
         self.reference_image = reference_image
         self.annotation_image = annotation_image
@@ -226,7 +229,7 @@ class Postprocessing:
     
         # 1) Determine which features (lipids) are restorable based on Moran’s I threshold
         isitrestorable = (self.morans > moran_threshold).sum(axis=1).sort_values()
-        torestore = isitrestorable[isitrestorable > 3].index
+        torestore = isitrestorable[isitrestorable > 3].index ######################################################################################################################
     
         # 2) Adjust alldata columns: ensure first 1400 columns are cast to string numbers (example-specific)
         cols = np.array(self.alldata.columns).astype(float).astype(str)
@@ -240,7 +243,7 @@ class Postprocessing:
             usage_dataframe = self.morans.loc[:, usage_columns].copy()
         else:
             usage_dataframe = self.morans.copy()
-        usage_dataframe.columns = self.pixels['SectionID'].unique()################# 
+        usage_dataframe.columns = self.pixels['SectionID'].unique()##################################################################################
         
         # Define helper: choose top `usage_top_n` above `usage_threshold` per row
         def top_n_above_threshold(row, threshold=usage_threshold, top_n=usage_top_n):
@@ -270,6 +273,11 @@ class Postprocessing:
     
         metrics_df = pd.DataFrame(columns=["train_pearson_r", "train_rmse", "val_pearson_r", "val_rmse"])
     
+    
+        print(usage_dataframe.index.astype(str))
+        print(lipids_to_restore.columns.astype(str))
+        print(np.intersect1d(usage_dataframe.index.astype(str), lipids_to_restore.index.astype(str)))
+    
         # 3) Loop over features in usage_dataframe to train a model for each
         for index, row in tqdm(usage_dataframe.iterrows(), total=usage_dataframe.shape[0], desc="XGB Restoration"):
             # For each lipid feature index, gather sections that are True in usage_dataframe
@@ -287,11 +295,14 @@ class Postprocessing:
     
             # Gather train data
             train_data = self.embeddings.loc[coords["SectionID"].astype(int).isin(train_sections), :]
-            y_train = lipids_to_restore.loc[train_data.index, str(index)]
-        
+            
+            print(lipids_to_restore)
+            column_key = str(float(index))
+            y_train = lipids_to_restore.loc[train_data.index, column_key]
+           
             # Gather val data
             val_data = self.embeddings.loc[coords["SectionID"].astype(int).isin([val_section]), :] #################
-            y_val = lipids_to_restore.loc[val_data.index, str(index)]
+            y_val = lipids_to_restore.loc[val_data.index, index]
     
             # 4) Train XGBoost model
             model_kwargs = xgb_params if xgb_params is not None else {}
@@ -345,9 +356,7 @@ class Postprocessing:
         valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index.astype(float).astype(str)
         coords_pred = coords_pred.loc[:, list(coords_pred.columns[:len(self.coordinates.columns)]) + list(valid_features)]
 
-        adatafs.obsm['X_restored'] = coords_pred.iloc[:, 3:].values ################################
-        
-        return adatafs
+        self.adata.obsm['X_restored'] = coords_pred.iloc[:, 3:].values
 
 
     # -------------------------------------------------------------------------

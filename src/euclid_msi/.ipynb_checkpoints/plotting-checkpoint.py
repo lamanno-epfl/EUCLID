@@ -531,36 +531,6 @@ class Plotting:
         else:
             plt.close()
 
-    def plot_scatter(self, x: np.ndarray, y: np.ndarray, color: np.ndarray = None,
-                     xlabel: str = "", ylabel: str = "", title: str = "",
-                     show_inline: bool = False) -> None:
-        """
-        Plot a scatterplot for two continuous variables.
-        
-        Parameters
-        ----------
-        x, y : np.ndarray
-            Data for the x and y axes.
-        color : np.ndarray, optional
-            Color values for each point.
-        xlabel, ylabel, title : str, optional
-            Labels and title.
-        show_inline : bool, optional
-            Whether to display inline.
-        """
-        plt.figure(figsize=(8, 6))
-        plt.scatter(x, y, c=color, s=10, rasterized=True)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.title(title)
-        save_path = os.path.join(PLOTS_DIR, f"{title.replace(' ', '_')}_scatter.pdf")
-        plt.tight_layout()
-        plt.savefig(save_path)
-        if show_inline:
-            plt.show()
-        else:
-            plt.close()
-
     def plot_sample_correlation_pca(self, centroids: pd.DataFrame, show_inline: bool = False) -> None:
         """
         Plot 3D PCA of sample centroids and a clustermap of their correlation.
@@ -597,40 +567,8 @@ class Plotting:
         cg.savefig(os.path.join(PLOTS_DIR, "sample_correlation_heatmap.pdf"))
         plt.close()
 
-    def plot_dendrogram(self, linkage_matrix: np.ndarray, labels: list,
-                        leaf_font_size: int = 10, orientation: str = "left",
-                        show_inline: bool = False) -> None:
-        """
-        Plot a dendrogram using a provided linkage matrix and labels.
-        
-        Parameters
-        ----------
-        linkage_matrix : np.ndarray
-            Linkage matrix (of float type).
-        labels : list
-            Labels for the leaves.
-        leaf_font_size : int, optional
-            Font size for the leaf labels.
-        orientation : str, optional
-            Orientation of the dendrogram.
-        show_inline : bool, optional
-            Whether to display the plot inline.
-        """
-        plt.figure(figsize=(14, 10))
-        dendrogram(linkage_matrix, orientation=orientation, labels=labels,
-                   leaf_font_size=leaf_font_size, color_threshold=0,
-                   link_color_func=lambda k: "black")
-        plt.xlabel("Distance")
-        plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, "dendrogram.pdf")
-        plt.savefig(save_path)
-        if show_inline:
-            plt.show()
-        else:
-            plt.close()
-
     def plot_differential_barplot(self, diff_df: pd.DataFrame, indices_to_label: list,
-                                  ylabel: str = "Mean susceptibility", show_inline: bool = False) -> None:
+                                  ylabel: str = "log2 fold change", show_inline: bool = False) -> None:
         """
         Plot a sorted barplot for differential lipids colored by their class.
         
@@ -679,10 +617,6 @@ class Plotting:
     def plot_treemap(self):
         """Placeholder for lipizones interactive treemap."""
         print("plot_treemap not implemented yet.")
-
-    def plot_clock(self):
-        """Placeholder for visualizing a clock."""
-        print("plot_clock not implemented yet.")
 
     def make_movie(self):
         """Placeholder for making a movie from the data."""

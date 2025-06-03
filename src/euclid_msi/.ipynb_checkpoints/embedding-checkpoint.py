@@ -34,10 +34,11 @@ class Embedding():
         prep : object
             A preprocessing object containing AnnData (adata) with single-cell data.
         """
-        self.adata = prep.adata
-        self.data_df = pd.DataFrame(prep.adata.X, 
-                                  index=prep.adata.obs_names, 
-                                  columns=prep.adata.var_names).fillna(0.0001)
+        if prep is not None:
+            self.adata = prep.adata
+            self.data_df = pd.DataFrame(prep.adata.X, 
+                                      index=prep.adata.obs_names, 
+                                      columns=prep.adata.var_names).fillna(0.0001)
 
     def learn_seeded_nmf_embeddings(
         self,
@@ -239,8 +240,6 @@ class Embedding():
         """
         recon = np.dot(self.adata.obsm['X_Harmonized'], self.factor_to_lipid)
         self.adata.obsm['X_approximated'] = recon - np.min(recon) + 1e-7
-        
-        return ""
 
     def tsne(
         self,
@@ -317,4 +316,30 @@ class Embedding():
         filename : str, optional
             File path to save the AnnData object.
         """
+        
+        for k, v in list(self.adata.obsm.items()):
+            if isinstance(v, pd.DataFrame):
+                self.adata.obsm[k] = v.values
+        
         self.adata.write_h5ad(filename)
+        
+    
+    def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
+        self,
+        filename="emb_msi_dataset.h5ad"
+    ) -> sc.AnnData:
+        """
+        Load an AnnData object from disk.
+
+        Parameters
+        ----------
+        filename : str, optional
+            File path from which to load the AnnData object.
+
+        Returns
+        -------
+        sc.AnnData
+            The loaded AnnData object.
+        """
+        adata = sc.read_h5ad(filename)
+        self.adata = adata
