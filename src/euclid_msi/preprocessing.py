@@ -435,7 +435,18 @@ class Preprocessing:
                     lower_bound = path_mz - ppm / 1e6 * path_mz
                     upper_bound = path_mz + ppm / 1e6 * path_mz
                     matching_lipids = lipid_mz_df[(lipid_mz_df['m/z'] >= lower_bound) & (lipid_mz_df['m/z'] <= upper_bound)]['Lipids']
-                    return ', '.join(matching_lipids)
+                    # Split each lipid string at semicolons but preserve ";O2"
+                    lipid_list = []
+                    for lipid_str in matching_lipids:
+                        if isinstance(lipid_str, str):
+                            # First replace ";O2" with a temporary marker
+                            temp_str = lipid_str.replace(";O2", "___O2___")
+                            # Then split by semicolon
+                            parts = [p.strip() for p in temp_str.split(';')]
+                            # Restore ";O2" in each part
+                            parts = [p.replace("___O2___", ";O2") for p in parts]
+                            lipid_list.extend(parts)
+                    return lipid_list if lipid_list else None
                 except:
                     return None
     
@@ -454,6 +465,7 @@ class Preprocessing:
 
     def abundance_prioritization_lcms(
         self,
+        matched_table: pd.DataFrame,
         lcms_csv: str,
         annotation_col: str = 'Lipid',
         threshold: float = 0.8
@@ -465,6 +477,8 @@ class Preprocessing:
 
         Parameters
         ----------
+        matched_table : pd.DataFrame
+            The annotation table (e.g., from annotate_molecules).
         lcms_csv : str
             Path to the LCMS data CSV file containing lipid abundances.
             Expected columns: lipid names and 'nmol_fraction_LCMS'.
@@ -476,45 +490,38 @@ class Preprocessing:
         Returns
         -------
         pd.DataFrame
-            Updated peaks dataframe with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
+            Updated annotation table with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
         """
-        # Read LCMS data
         lcms_data = pd.read_csv(lcms_csv)
-        
-        # Get the peaks dataframe from the last annotation
-        peaks_df = self.adata.var.copy()
-        
-        # Create new column for prioritized annotations
+        lcms_data = lcms_data.set_index(lcms_data.columns[0])  # Assume first column is lipid name
+
+        peaks_df = matched_table.copy()
         peaks_df['AnnotationLCMSPrioritized'] = peaks_df[annotation_col]
-        
-        # Process each annotation
+
         for i, annot in enumerate(peaks_df[annotation_col]):
-            if pd.isna(annot):
+            if annot is None or (isinstance(annot, list) and len(annot) == 0):
                 continue
-                
+            
             # Handle both string and list annotations
             if isinstance(annot, str):
-                annot = [annot]
-            
-            # Get LCMS data for these lipids
-            now = lcms_data[lcms_data.index.isin(annot)]
-            
-            if not now.empty:
-                # Calculate molar fractions
-                now = now / now.sum()
+                annot_list = [a.strip() for a in annot.split(',')]
+            else:
+                annot_list = list(annot)
                 
+            # Get LCMS data for these lipids
+            now = lcms_data.loc[lcms_data.index.intersection(annot_list)]
+            if not now.empty:
                 # Check if any lipid exceeds threshold
                 if now['nmol_fraction_LCMS'].max() > threshold:
-                    # Get the lipid with highest fraction
-                    prioritized = now.index[now['nmol_fraction_LCMS'] > threshold].values[0]
-                    peaks_df['AnnotationLCMSPrioritized'].iloc[i] = prioritized
-        
+                    prioritized = now.index[now['nmol_fraction_LCMS'] > threshold][0]
+                    peaks_df.at[peaks_df.index[i], 'AnnotationLCMSPrioritized'] = prioritized
         return peaks_df
 
     def prioritize_adducts_by_signal(
         self,
         path_data,
         acquisitions,
+        prioritized_table,
         annotation_col='AnnotationLCMSPrioritized',
         n_sections=5
     ):
@@ -527,8 +534,10 @@ class Preprocessing:
         ----------
         path_data : str
             Path to the Zarr dataset containing the MSI data.
-        acquisitions : list of str
-            List of acquisition paths for the sections.
+        acquisitions : pd.DataFrame
+            DataFrame containing acquisition information with columns 'acqn' and 'acqpath'.
+        prioritized_table : pd.DataFrame
+            The DataFrame from abundance_prioritization_lcms to add results to.
         annotation_col : str, optional
             Name of the column containing lipid annotations (default: 'AnnotationLCMSPrioritized').
         n_sections : int, optional
@@ -537,15 +546,12 @@ class Preprocessing:
         Returns
         -------
         pd.DataFrame
-            Updated peaks dataframe with best adducts in a new column 'BestAdduct'.
+            Updated prioritized_table with best adducts in a new column 'BestAdduct'.
         """
-        # Get the peaks dataframe
-        peaks_df = self.adata.var.copy()
-        
         # Create dictionary mapping annotations to their possible m/z values
         annotation_to_mz = {}
-        for mz, annot in zip(peaks_df.index, peaks_df[annotation_col]):
-            if pd.isna(annot):
+        for mz, annot in zip(prioritized_table.index, prioritized_table[annotation_col]):
+            if annot is None or (isinstance(annot, list) and len(annot) == 0):
                 continue
             if isinstance(annot, str):
                 annot = [annot]
@@ -553,30 +559,38 @@ class Preprocessing:
                 if a not in annotation_to_mz:
                     annotation_to_mz[a] = []
                 annotation_to_mz[a].append(mz)
+
+        del annotation_to_mz['_db']
         
-        # Load masks for signal calculation
+        # Load masks for signal calculation ##################### PART HERE IS STILL PERFECTLY BROKEN
+        acqn = acquisitions['acqn'].values
+        print(acqn)
+        acquisitions = acquisitions['acqpath'].values
+        print(acquisitions)
         masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
         
-        # Calculate total signal for each m/z value across sections
+        n_acquisitions = len(acquisitions)
+        accqn_num = np.arange(n_acquisitions)
+
+        # Calculate total signal for each m/z value across sections #####################
         root = zarr.open(path_data, mode='r')
-        features = peaks_df.index
+        features = prioritized_table.index
         totsig_df = pd.DataFrame(
-            np.zeros((len(features), n_sections)), 
+            np.zeros((len(features), n_acquisitions)), 
             index=features, 
-            columns=np.arange(n_sections).astype(str)
+            columns=acqn.astype(str)
         )
-        
+
         # Calculate signals for first n_sections
         for i, feat in enumerate(features):
             feat_dec = f"{float(feat):.6f}"
-            ns = np.array(list(root[feat_dec].keys())).astype(int).astype(str)[:n_sections]
-            
-            for nnn in ns:
-                MASK = masks[int(nnn)]
-                image = root[feat_dec][nnn][:]
+            # Use proper section mapping from acquisitions DataFrame
+            for j, j1 in zip(acqn, accqn_num):
+                MASK = masks[j1]
+                image = np.exp(root[feat_dec][str(j)][:])
                 image[MASK == 0] = 0
                 sig = np.mean(image * 1e6)
-                totsig_df.loc[feat, nnn] = sig
+                totsig_df.loc[feat, str(j)] = sig
         
         # Fill NaN values with 0
         totsig_df = totsig_df.fillna(0)
@@ -600,10 +614,26 @@ class Preprocessing:
             if best_mz is not None:
                 annotation_to_mz_best[annotation] = best_mz
         
-        # Add best adduct information to peaks dataframe
-        peaks_df['BestAdduct'] = peaks_df[annotation_col].map(annotation_to_mz_best)
+        # Add best adduct information to prioritized_table
+        def get_best_adduct(annot):
+            if annot is None or (isinstance(annot, list) and len(annot) == 0):
+                return None
+            if isinstance(annot, str):
+                return annotation_to_mz_best.get(annot)
+            # If it's a list, return the first valid best adduct found
+            for a in annot:
+                if a in annotation_to_mz_best:
+                    return annotation_to_mz_best[a]
+            return None
+
+        prioritized_table['BestAdduct'] = prioritized_table[annotation_col].apply(get_best_adduct)
         
-        return peaks_df
+        prioritized_table["AnnotationLCMSPrioritized"] = prioritized_table["AnnotationLCMSPrioritized"] \
+            .apply(lambda x: ",".join(x) if isinstance(x, list) else "")
+
+        return prioritized_table
+
+
 
     def save_msi_dataset(
         self,
@@ -1117,9 +1147,9 @@ class Preprocessing:
         lipid_names = self.adata.var_names.values
         
         df = pd.DataFrame(lipid_names, columns=["lipid_name"]).fillna('')
-        # Regex extraction
+        # Regex extraction - modified to handle both ether lipids and compound class names
         df["class"] = df["lipid_name"].apply(
-            lambda x: re.match(r'^(PE O|PC O|\S+)', x).group(0) if re.match(r'^(PE O|PC O|\S+)', x) else ''
+            lambda x: re.match(r'^([A-Za-z0-9]+ O-|[A-Za-z0-9]+)', x).group(0) if re.match(r'^([A-Za-z0-9]+ O-|[A-Za-z0-9]+)', x) else ''
         )
         df["carbons"] = df["lipid_name"].apply(
             lambda x: int(re.search(r'(\d+):', x).group(1)) if re.search(r'(\d+):', x) else np.nan
@@ -1225,22 +1255,28 @@ class Preprocessing:
         X_classes = ['C', 'S', 'E', 'G', 'I', 'A']
         conditions = []
 
-        # 1. LPx <-> Px rules (as before)
-        conditions.append(
+        # Rule 1: reagent is LPX and product is PX where X is the same
+        condition1 = (
             premanannot['reagent_class'].str.startswith('LP') &
             premanannot['product_class'].str.startswith('P') &
             premanannot['X_reagent'].isin(X_classes) &
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-        conditions.append(
+        conditions.append(condition1)
+
+        # Rule 2: reagent is PX and product is LPX where X is the same
+        condition2 = (
             premanannot['reagent_class'].str.startswith('P') &
             premanannot['product_class'].str.startswith('LP') &
             premanannot['X_reagent'].isin(X_classes) &
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-        conditions.append(
+        conditions.append(condition2)
+
+        # Rule 3a: reagent is ether LPX O- and product is ether PX O- with the same X
+        condition3a = (
             premanannot['reagent_class'].str.startswith('LP') &
             premanannot['reagent_class'].str.contains('O-') &
             premanannot['product_class'].str.startswith('P') &
@@ -1249,7 +1285,10 @@ class Preprocessing:
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-        conditions.append(
+        conditions.append(condition3a)
+
+        # Rule 3b: reagent is ether PX O- and product is ether LPX O- with the same X
+        condition3b = (
             premanannot['reagent_class'].str.startswith('P') &
             premanannot['reagent_class'].str.contains('O-') &
             premanannot['product_class'].str.startswith('LP') &
@@ -1258,54 +1297,136 @@ class Preprocessing:
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
+        conditions.append(condition3b)
 
-        # 2. Class changes (between non-LPx classes, same carbons and insaturations, but different class)
-        # Define the set of classes for class changes
-        class_change_set = {'PC', 'PE', 'PS', 'PA', 'PG', 'DG', 'SM', 'Cer', 'HexCer', 'Hex2Cer'}
-        conditions.append(
-            (premanannot['reagent_class'].isin(class_change_set)) &
-            (premanannot['product_class'].isin(class_change_set)) &
-            (premanannot['reagent_class'] != premanannot['product_class']) &
-            (premanannot['product_carbons'] == premanannot['reagent_carbons']) &
-            (premanannot['product_insaturations'] == premanannot['reagent_insaturations'])
+        # Rule 4: reagent is PC and product is PA
+        condition4 = (
+            (premanannot['reagent_class'] == 'PC') &
+            (premanannot['product_class'] == 'PA') & 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
         )
+        conditions.append(condition4)
 
-        # 3. The rest of the rules (chain length, etc.)
-        conditions.append(
+        # Rule 5: reagent is LPC and product is LPC with longer chain length
+        condition5 = (
             (premanannot['reagent_class'] == 'LPC') &
             (premanannot['product_class'] == 'LPC') &
             (premanannot['product_carbons'] > premanannot['reagent_carbons'])
         )
-        conditions.append(
-            (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'PA')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'DG')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'SM') & (premanannot['product_class'] == 'Cer')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'HexCer')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'SM')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Cer')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Hex2Cer')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'Hex2Cer') & (premanannot['product_class'] == 'HexCer')
-        )
-        conditions.append(
-            (premanannot['reagent_class'] == 'PG') & (premanannot['product_class'] == 'DG')
-        )
+        conditions.append(condition5)
 
+        # Rule 6: reagent is PC and product is DG
+        condition6 = (
+            (premanannot['reagent_class'] == 'PC') &
+            (premanannot['product_class'] == 'DG')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition6)
+
+        # Rule 7: reagent is PS and product is PE
+        condition7 = (
+            (premanannot['reagent_class'] == 'PS') &
+            (premanannot['product_class'] == 'PE')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition7)
+
+        # Rule 8: reagent is PE and product is PS
+        condition8 = (
+            (premanannot['reagent_class'] == 'PE') &
+            (premanannot['product_class'] == 'PS')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition8)
+
+        # Rule 9: reagent is PE and product is PC
+        condition9 = (
+            (premanannot['reagent_class'] == 'PE') &
+            (premanannot['product_class'] == 'PC')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition9)
+
+        # Rule 10: reagent is SM and product is Cer
+        condition10 = (
+            (premanannot['reagent_class'] == 'SM') &
+            (premanannot['product_class'] == 'Cer')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition10)
+
+        # Rule 11: reagent is Cer and product is HexCer
+        condition11 = (
+            (premanannot['reagent_class'] == 'Cer') &
+            (premanannot['product_class'] == 'HexCer')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition11)
+
+        # Rule 12: reagent is Cer and product is SM
+        condition12 = (
+            (premanannot['reagent_class'] == 'Cer') &
+            (premanannot['product_class'] == 'SM')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition12)
+
+        # Rule 13: reagent is HexCer and product is Cer
+        condition13 = (
+            (premanannot['reagent_class'] == 'HexCer') &
+            (premanannot['product_class'] == 'Cer')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition13)
+
+        # Rule 14: reagent is HexCer and product is Hex2Cer
+        condition14 = (
+            (premanannot['reagent_class'] == 'HexCer') &
+            (premanannot['product_class'] == 'Hex2Cer')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition14)
+
+        # Rule 15: reagent is Hex2Cer and product is HexCer
+        condition15 = (
+            (premanannot['reagent_class'] == 'Hex2Cer') &
+            (premanannot['product_class'] == 'HexCer')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition15)
+
+        # Rule 16: reagent is PG and product is DG
+        condition16 = (
+            (premanannot['reagent_class'] == 'PG') &
+            (premanannot['product_class'] == 'DG')& 
+            (premanannot['reagent_carbons'] == premanannot['product_carbons']) &
+            (premanannot['reagent_insaturations'] == premanannot['product_insaturations'])
+        )
+        conditions.append(condition16)
+
+        # Step 6: Combine All Conditions Using Logical OR
+        # Using reduce for scalability
         final_condition = reduce(lambda x, y: x | y, conditions)
+
+        
+        # Step 7: Apply the Filter to `premanannot`
         filtered_premanannot = premanannot[final_condition].copy()
+
+        filtered_premanannot = filtered_premanannot.loc[~((filtered_premanannot['reagent_class'] == "LPC") & (filtered_premanannot['product_class'] == "PC O-")),:]
+        filtered_premanannot = filtered_premanannot.loc[~((filtered_premanannot['reagent_class'] == "LPE") & (filtered_premanannot['product_class'] == "PE O-")),:]
+        filtered_premanannot = filtered_premanannot.loc[~((filtered_premanannot['product_class'] == "LPC") & (filtered_premanannot['reagent_class'] == "PC O-")),:]
+        filtered_premanannot = filtered_premanannot.loc[~((filtered_premanannot['product_class'] == "LPE") & (filtered_premanannot['reagent_class'] == "PE O-")),:]
 
         # Enzyme mapping (as before)
         enzymes = {
