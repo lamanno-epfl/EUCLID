@@ -222,11 +222,12 @@ class Preprocessing:
         """
         Update the AnnData object by (1) filtering its observations to those present in a parquet metadata file,
         and (2) adding any metadata columns from that file which are not already present in adata.obs.
+        Matching is done based on Path, x, and y coordinates.
         
         Parameters
         ----------
         parquet_file : str
-            Path to the parquet file containing metadata (with the same index as your barcode/obs index).
+            Path to the parquet file containing metadata with Path, x, and y columns.
         
         Returns
         -------
@@ -234,14 +235,43 @@ class Preprocessing:
         """
         # Load metadata from parquet
         metadata_df = pd.read_parquet(parquet_file)
-        # Filter adata to keep only observations whose index exists in the metadata
-        common_index = self.adata.obs.index.intersection(metadata_df.index)
-        self.adata = self.adata[common_index].copy()
-        # For each column in the metadata that is not already in adata.obs, add it.
+
+        # Standardize types before creating composite keys
+        self.adata.obs['Path'] = self.adata.obs['Path'].astype(str).str.strip()
+        metadata_df['Path'] = metadata_df['Path'].astype(str).str.strip()
+        self.adata.obs['x'] = self.adata.obs['x'].astype(int)
+        metadata_df['x'] = metadata_df['x'].astype(int)
+        self.adata.obs['y'] = self.adata.obs['y'].astype(int)
+        metadata_df['y'] = metadata_df['y'].astype(int)
+
+        # Create a composite key for matching in both dataframes
+        adata_key = self.adata.obs[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+        metadata_key = metadata_df[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+        
+        # Find common entries using pandas isin method
+        common_keys = adata_key[adata_key.isin(metadata_key)]
+        
+        # Filter adata to keep only observations that match the metadata
+        self.adata = self.adata[adata_key.isin(common_keys)].copy()
+        
+        # For each column in the metadata that is not already in adata.obs, add it
         for col in metadata_df.columns:
-            if col not in self.adata.obs.columns:
-                # Align by index.
-                self.adata.obs[col] = metadata_df.loc[self.adata.obs.index, col]
+            if col not in ['Path', 'x', 'y'] and col not in self.adata.obs.columns:
+                # Create a mapping from composite key to metadata value
+                value_map = dict(zip(metadata_key, metadata_df[col]))
+                # Map values using the composite key
+                self.adata.obs[col] = adata_key.map(value_map)
+                
+        # Print some debugging information
+        print(f"Number of observations after filtering: {len(self.adata.obs)}")
+        if 'allencolor' in self.adata.obs.columns:
+            print("\nUnique allencolor values:")
+            print(self.adata.obs['allencolor'].value_counts().head())
+            print(f"\nNumber of NaN values in allencolor: {self.adata.obs['allencolor'].isna().sum()}")
 
     def filter_by_metadata(self, column: str, operation: str) -> sc.AnnData:
         """
@@ -267,8 +297,36 @@ class Preprocessing:
         -------
         >>> filtered_adata = preprocessing.filter_by_metadata("allencolor", "!='#000000'")
         """
-        query_str = f"`{column}` {operation}"
-        filtered_obs = self.adata.obs.query(query_str)
+        if column not in self.adata.obs.columns:
+            raise ValueError(f"Column '{column}' not found in adata.obs")
+            
+        # Print some debugging information
+        print(f"Total observations before filtering: {len(self.adata.obs)}")
+        print(f"Unique values in {column}: {self.adata.obs[column].unique()}")
+        
+        # Handle NaN values explicitly
+        if operation.startswith('!='):
+            # For != operations, we want to keep non-NaN values that don't match
+            filtered_obs = self.adata.obs[
+                (self.adata.obs[column].notna()) & 
+                (self.adata.obs[column].astype(str) != operation.split('!=')[1].strip("'"))
+            ]
+        elif operation.startswith('=='):
+            # For == operations, we want to keep exact matches
+            filtered_obs = self.adata.obs[
+                (self.adata.obs[column].notna()) & 
+                (self.adata.obs[column].astype(str) == operation.split('==')[1].strip("'"))
+            ]
+        else:
+            # For other operations, use query but handle NaN values
+            query_str = f"`{column}` {operation}"
+            filtered_obs = self.adata.obs.query(query_str)
+        
+        if len(filtered_obs) == 0:
+            print(f"Warning: No observations match the condition '{operation}'")
+            return self.adata.copy()
+            
+        print(f"Number of observations after filtering: {len(filtered_obs)}")
         filtered_index = filtered_obs.index
         return self.adata[filtered_index].copy()
 
@@ -383,8 +441,7 @@ class Preprocessing:
     
             peaks_df['Lipid'] = [_find_matching_lipids(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
             user_df.index = user_df['m/z'].astype(str)
-            peaks_df.index = peaks_df.index.astype(str)
-            
+            peaks_df.index = peaks_df.index.astype(str) 
                 
         except:
             print("No paired LC-MS or METASPACE annotation dataset provided. Are you sure you want to continue with database search only?")
@@ -395,6 +452,158 @@ class Preprocessing:
 
         return peaks_df
 
+    def abundance_prioritization_lcms(
+        self,
+        lcms_csv: str,
+        annotation_col: str = 'Lipid',
+        threshold: float = 0.8
+    ) -> pd.DataFrame:
+        """
+        Prioritize lipid annotations based on LCMS abundance data.
+        For each m/z peak with multiple possible lipid annotations, if one of the lipids
+        has a molar fraction > threshold in the LCMS data, it will be prioritized.
+
+        Parameters
+        ----------
+        lcms_csv : str
+            Path to the LCMS data CSV file containing lipid abundances.
+            Expected columns: lipid names and 'nmol_fraction_LCMS'.
+        annotation_col : str, optional
+            Name of the column containing lipid annotations in the peaks dataframe.
+        threshold : float, optional
+            Minimum molar fraction threshold for prioritizing a lipid (default: 0.8).
+
+        Returns
+        -------
+        pd.DataFrame
+            Updated peaks dataframe with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
+        """
+        # Read LCMS data
+        lcms_data = pd.read_csv(lcms_csv)
+        
+        # Get the peaks dataframe from the last annotation
+        peaks_df = self.adata.var.copy()
+        
+        # Create new column for prioritized annotations
+        peaks_df['AnnotationLCMSPrioritized'] = peaks_df[annotation_col]
+        
+        # Process each annotation
+        for i, annot in enumerate(peaks_df[annotation_col]):
+            if pd.isna(annot):
+                continue
+                
+            # Handle both string and list annotations
+            if isinstance(annot, str):
+                annot = [annot]
+            
+            # Get LCMS data for these lipids
+            now = lcms_data[lcms_data.index.isin(annot)]
+            
+            if not now.empty:
+                # Calculate molar fractions
+                now = now / now.sum()
+                
+                # Check if any lipid exceeds threshold
+                if now['nmol_fraction_LCMS'].max() > threshold:
+                    # Get the lipid with highest fraction
+                    prioritized = now.index[now['nmol_fraction_LCMS'] > threshold].values[0]
+                    peaks_df['AnnotationLCMSPrioritized'].iloc[i] = prioritized
+        
+        return peaks_df
+
+    def prioritize_adducts_by_signal(
+        self,
+        path_data,
+        acquisitions,
+        annotation_col='AnnotationLCMSPrioritized',
+        n_sections=5
+    ):
+        """Prioritize adducts based on total signal across sections.
+        
+        For each lipid annotation with multiple possible m/z values (adducts),
+        find the adduct that has the highest total signal across sections.
+
+        Parameters
+        ----------
+        path_data : str
+            Path to the Zarr dataset containing the MSI data.
+        acquisitions : list of str
+            List of acquisition paths for the sections.
+        annotation_col : str, optional
+            Name of the column containing lipid annotations (default: 'AnnotationLCMSPrioritized').
+        n_sections : int, optional
+            Number of sections to check for signal calculation (default: 5).
+
+        Returns
+        -------
+        pd.DataFrame
+            Updated peaks dataframe with best adducts in a new column 'BestAdduct'.
+        """
+        # Get the peaks dataframe
+        peaks_df = self.adata.var.copy()
+        
+        # Create dictionary mapping annotations to their possible m/z values
+        annotation_to_mz = {}
+        for mz, annot in zip(peaks_df.index, peaks_df[annotation_col]):
+            if pd.isna(annot):
+                continue
+            if isinstance(annot, str):
+                annot = [annot]
+            for a in annot:
+                if a not in annotation_to_mz:
+                    annotation_to_mz[a] = []
+                annotation_to_mz[a].append(mz)
+        
+        # Load masks for signal calculation
+        masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
+        
+        # Calculate total signal for each m/z value across sections
+        root = zarr.open(path_data, mode='r')
+        features = peaks_df.index
+        totsig_df = pd.DataFrame(
+            np.zeros((len(features), n_sections)), 
+            index=features, 
+            columns=np.arange(n_sections).astype(str)
+        )
+        
+        # Calculate signals for first n_sections
+        for i, feat in enumerate(features):
+            feat_dec = f"{float(feat):.6f}"
+            ns = np.array(list(root[feat_dec].keys())).astype(int).astype(str)[:n_sections]
+            
+            for nnn in ns:
+                MASK = masks[int(nnn)]
+                image = root[feat_dec][nnn][:]
+                image[MASK == 0] = 0
+                sig = np.mean(image * 1e6)
+                totsig_df.loc[feat, nnn] = sig
+        
+        # Fill NaN values with 0
+        totsig_df = totsig_df.fillna(0)
+        
+        # Calculate total signal for each feature
+        featuresum = totsig_df.sum(axis=1)
+        
+        # Find best adduct for each annotation
+        annotation_to_mz_best = {}
+        for annotation, mz_values in annotation_to_mz.items():
+            max_featuresum = -float('inf')
+            best_mz = None
+            
+            for mz_value in mz_values:
+                if mz_value in featuresum.index:
+                    featuresum_value = featuresum.loc[mz_value]
+                    if featuresum_value > max_featuresum:
+                        max_featuresum = featuresum_value
+                        best_mz = mz_value
+            
+            if best_mz is not None:
+                annotation_to_mz_best[annotation] = best_mz
+        
+        # Add best adduct information to peaks dataframe
+        peaks_df['BestAdduct'] = peaks_df[annotation_col].map(annotation_to_mz_best)
+        
+        return peaks_df
 
     def save_msi_dataset(
         self,
@@ -935,102 +1144,103 @@ class Preprocessing:
 
     def reaction_network(self, lipid_props_df, premanannot=None):
         """
-        Extract a reaction network based on lipid classes and transformation rules.
+        Extract a reaction network based on lipid classes and transformation rules, and annotate with enzymes.
 
         Parameters
         ----------
         lipid_props_df : pd.DataFrame
             A DataFrame with lipid properties (index=lipid_name, columns=class,carbons,insaturations,...).
+        premanannot : pd.DataFrame, optional
+            DataFrame with columns ['reagent', 'product']. If None, all pairs are generated.
+
         Returns
         -------
         pd.DataFrame
-            Filtered premanannot that satisfies the transformation rules.
+            Filtered premanannot that satisfies the transformation rules, with enzyme annotation.
         """
-        if premanannot is None:
-            all_pairs = list(itertools.product(lipid_props_df.index, lipid_props_df.index))
-            premanannot = pd.DataFrame(all_pairs, columns=['reagent', 'product'])
-            
+        import numpy as np
+        import pandas as pd
+        import re
+        from functools import reduce
+        import itertools
+
         df = lipid_props_df.copy()
         if df.index.name != 'lipid_name':
-            df.set_index('lipid_name', inplace=True)
+            df = df.set_index('lipid_name')
 
-        # Merge reagent attributes
+        # If not provided, generate all pairs
+        if premanannot is None:
+            all_pairs = list(itertools.product(df.index, df.index))
+            premanannot = pd.DataFrame(all_pairs, columns=['reagent', 'product'])
+
+        # Merge to get reagent attributes
         premanannot = premanannot.merge(
             df[['class', 'carbons', 'insaturations']],
             left_on='reagent',
             right_index=True,
             how='left',
             suffixes=('', '_reagent')
-        ).rename(columns={
-            'class': 'reagent_class',
-            'carbons': 'reagent_carbons',
-            'insaturations': 'reagent_insaturations'
-        })
+        )
+        premanannot.rename(
+            columns={
+                'class': 'reagent_class',
+                'carbons': 'reagent_carbons',
+                'insaturations': 'reagent_insaturations'
+            },
+            inplace=True
+        )
 
-        # Merge product attributes
+        # Merge to get product attributes
         premanannot = premanannot.merge(
             df[['class', 'carbons', 'insaturations']],
             left_on='product',
             right_index=True,
             how='left',
             suffixes=('', '_product')
-        ).rename(columns={
-            'class': 'product_class',
-            'carbons': 'product_carbons',
-            'insaturations': 'product_insaturations'
-        })
+        )
+        premanannot.rename(
+            columns={
+                'class': 'product_class',
+                'carbons': 'product_carbons',
+                'insaturations': 'product_insaturations'
+            },
+            inplace=True
+        )
 
         # Extract X
-        premanannot['X_reagent'] = premanannot['reagent_class'].apply(self._extract_X)
-        premanannot['X_product'] = premanannot['product_class'].apply(self._extract_X)
-
-        # Build conditions
-        conditions = self._build_reaction_conditions(premanannot)
-        final_condition = reduce(lambda x, y: x | y, conditions)
-        filtered = premanannot[final_condition].copy()
-
-        return filtered
-
-
-    def _extract_X(self, lipid_class):
-        """
-        Extract the 'X' component from a lipid class, e.g. 'LPX', 'PX', possibly with 'O-'.
-        """
-        if pd.isna(lipid_class):
+        def extract_X(lipid_class):
+            if pd.isna(lipid_class):
+                return None
+            if 'O-' in lipid_class:
+                match = re.match(r'^LP([CSEGIA]) O-|^P([CSEGIA]) O-', lipid_class)
+            else:
+                match = re.match(r'^LP([CSEGIA])|^P([CSEGIA])', lipid_class)
+            if match:
+                return match.group(1) if match.group(1) else match.group(2)
             return None
-        if 'O-' in lipid_class:
-            match = re.match(r'^LP([CSEGIA]) O-|^P([CSEGIA]) O-', lipid_class)
-        else:
-            match = re.match(r'^LP([CSEGIA])|^P([CSEGIA])', lipid_class)
-        if match:
-            return match.group(1) if match.group(1) else match.group(2)
-        return None
 
+        premanannot['X_reagent'] = premanannot['reagent_class'].apply(extract_X)
+        premanannot['X_product'] = premanannot['product_class'].apply(extract_X)
 
-    def _build_reaction_conditions(self, premanannot):
-        """
-        Define a list of conditions that specify valid transformations.
-        Returns a list of boolean Series for OR-combination.
-        """
         X_classes = ['C', 'S', 'E', 'G', 'I', 'A']
+        conditions = []
 
-        c1 = (
+        # 1. LPx <-> Px rules (as before)
+        conditions.append(
             premanannot['reagent_class'].str.startswith('LP') &
             premanannot['product_class'].str.startswith('P') &
             premanannot['X_reagent'].isin(X_classes) &
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-
-        c2 = (
+        conditions.append(
             premanannot['reagent_class'].str.startswith('P') &
             premanannot['product_class'].str.startswith('LP') &
             premanannot['X_reagent'].isin(X_classes) &
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-
-        c3a = (
+        conditions.append(
             premanannot['reagent_class'].str.startswith('LP') &
             premanannot['reagent_class'].str.contains('O-') &
             premanannot['product_class'].str.startswith('P') &
@@ -1039,8 +1249,7 @@ class Preprocessing:
             premanannot['X_product'].isin(X_classes) &
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
-
-        c3b = (
+        conditions.append(
             premanannot['reagent_class'].str.startswith('P') &
             premanannot['reagent_class'].str.contains('O-') &
             premanannot['product_class'].str.startswith('LP') &
@@ -1050,22 +1259,86 @@ class Preprocessing:
             (premanannot['X_reagent'] == premanannot['X_product'])
         )
 
-        c4 = (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'PA')
-        c5 = (
+        # 2. Class changes (between non-LPx classes, same carbons and insaturations, but different class)
+        # Define the set of classes for class changes
+        class_change_set = {'PC', 'PE', 'PS', 'PA', 'PG', 'DG', 'SM', 'Cer', 'HexCer', 'Hex2Cer'}
+        conditions.append(
+            (premanannot['reagent_class'].isin(class_change_set)) &
+            (premanannot['product_class'].isin(class_change_set)) &
+            (premanannot['reagent_class'] != premanannot['product_class']) &
+            (premanannot['product_carbons'] == premanannot['reagent_carbons']) &
+            (premanannot['product_insaturations'] == premanannot['reagent_insaturations'])
+        )
+
+        # 3. The rest of the rules (chain length, etc.)
+        conditions.append(
             (premanannot['reagent_class'] == 'LPC') &
             (premanannot['product_class'] == 'LPC') &
             (premanannot['product_carbons'] > premanannot['reagent_carbons'])
         )
-        c6 = (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'DG')
-        c7 = (premanannot['reagent_class'] == 'PS') & (premanannot['product_class'] == 'PE')
-        c8 = (premanannot['reagent_class'] == 'PE') & (premanannot['product_class'] == 'PS')
-        c9 = (premanannot['reagent_class'] == 'PE') & (premanannot['product_class'] == 'PC')
-        c10 = (premanannot['reagent_class'] == 'SM') & (premanannot['product_class'] == 'Cer')
-        c11 = (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'HexCer')
-        c12 = (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'SM')
-        c13 = (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Cer')
-        c14 = (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Hex2Cer')
-        c15 = (premanannot['reagent_class'] == 'Hex2Cer') & (premanannot['product_class'] == 'HexCer')
-        c16 = (premanannot['reagent_class'] == 'PG') & (premanannot['product_class'] == 'DG')
+        conditions.append(
+            (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'PA')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'PC') & (premanannot['product_class'] == 'DG')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'SM') & (premanannot['product_class'] == 'Cer')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'HexCer')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'Cer') & (premanannot['product_class'] == 'SM')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Cer')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'HexCer') & (premanannot['product_class'] == 'Hex2Cer')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'Hex2Cer') & (premanannot['product_class'] == 'HexCer')
+        )
+        conditions.append(
+            (premanannot['reagent_class'] == 'PG') & (premanannot['product_class'] == 'DG')
+        )
 
-        return [c1, c2, c3a, c3b, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16]
+        final_condition = reduce(lambda x, y: x | y, conditions)
+        filtered_premanannot = premanannot[final_condition].copy()
+
+        # Enzyme mapping (as before)
+        enzymes = {
+            ("LPC", "PC"):      ("Lpcat1", "Lpcat2"),
+            ("PC", "LPC"):      ("Pla2g2a",),
+            ("PC", "PA"):       ("Pld1", "Pld2"),
+            ("PC", "DG"):       ("Plcb1",),
+            ("PS", "PE"):       ("Psd",),
+            ("PS", "PS"):       ("Pss1",),
+            ("PE", "PC"):       ("Pemt",),
+            ("SM", "Cer"):      ("Smpd1", "Smpd2", "Smpd3", "Smpd4"),
+            ("Cer", "HexCer"):  ("Ugcg", "Ugt8a"),
+            ("Cer", "SM"):      ("Sgms1", "Sgms2"),
+            ("HexCer", "Cer"):  ("Gba1", "Gba2", "Galc"),
+            ("HexCer", "Hex2Cer"): ("B4galt5", "B4galt6"),
+            ("Hex2Cer", "HexCer"): ("Glb1",),
+            ("LPC", "LPC"):     ("Lpcat3", "Lpcat4"),
+            ("LPG", "PG"):      ("Lpgat1",),
+            ("PG", "LPG"):      ("Pla2g2a",),
+            ("PE", "LPE"):      ("Pla2g2a",),
+            ("LPE", "PE"):      ("Mboat1", "Mboat2"),
+            ("PA", "LPA"):      ("Pla2g2a",),
+            ("LPA", "PA"):      ("Agpat1", "Agpat2"),
+            ("LPS", "PS"):      ("Mboat2",),
+            ("PS", "LPS"):      ("Pla2g2a",),
+            ("PE", "PS"):       ("Ptdss2",),
+            ("PG", "DG"):       ("Plcb1",),
+        }
+
+        def get_enzyme(row):
+            key = (row["reagent_class"], row["product_class"])
+            return enzymes.get(key, "Unknown")
+
+        filtered_premanannot["enzyme"] = filtered_premanannot.apply(get_enzyme, axis=1)
+
+        return filtered_premanannot
