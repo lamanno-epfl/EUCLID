@@ -17,6 +17,7 @@ from collections import deque
 import harmonypy as hm
 import networkx as nx
 from threadpoolctl import threadpool_limits
+from matplotlib.backends.backend_pdf import PdfPages
 
 # Configure thread limits
 threadpool_limits(limits=8)
@@ -161,7 +162,7 @@ class Embedding():
 
     def apply_nmf_embeddings(
         self,
-        new_data = None
+        new_adata = None
     ):
         """
         BLOCK 2:
@@ -169,12 +170,9 @@ class Embedding():
         
         Parameters
         ----------
-        new_data : pd.DataFrame
-            New data (pixels x lipids) on which to apply the NMF model.
-        nmf_model : NMF
-            A fitted NMF model from learn_seeded_nmf_embeddings.
-        adata : sc.AnnData, optional
-            AnnData object to which the embeddings will be added (in obsm['X_NMF']).
+        new_adata : sc.AnnData, optional
+            New AnnData object on which to apply the NMF model. If None, uses self.adata.
+            Should have the same var_names (features) as the training data.
 
         Returns
         -------
@@ -182,15 +180,27 @@ class Embedding():
             The NMF embeddings for the new data.
         """
         
-        if new_data is not None:
-            new_data_offset = new_data - np.min(new_data) + 1e-7
-            new_data_offset = np.ascontiguousarray(new_data_offset)
-            nmf_all = self.nmf.transform(new_data_offset)
-            embeddings = pd.DataFrame(nmf_all, index=new_data.index)
-            self.adata.obsm['X_NMF'] = embeddings.values
-            
+        if new_adata is not None:
+            # Verify that the new data has the same features
+            if not np.array_equal(new_adata.var_names, self.adata.var_names):
+                raise ValueError("New data must have the same features (var_names) as the training data")
+            data_to_transform = pd.DataFrame(new_adata.X, 
+                                          index=new_adata.obs_names, 
+                                          columns=new_adata.var_names)
+            target_adata = new_adata
         else:
-            self.adata.obsm['X_NMF'] = self.nmf_embeddings
+            data_to_transform = pd.DataFrame(self.adata.X, 
+                                          index=self.adata.obs_names, 
+                                          columns=self.adata.var_names)
+            target_adata = self.adata
+            
+        data_offset = data_to_transform - np.min(data_to_transform) + 1e-7
+        data_offset = np.ascontiguousarray(data_offset)
+        nmf_all = self.nmf.transform(data_offset)
+        embeddings = pd.DataFrame(nmf_all, index=data_to_transform.index)
+        target_adata.obsm['X_NMF'] = embeddings.values
+        
+        return target_adata
 
     def harmonize_nmf_batches(
         self,
@@ -305,26 +315,110 @@ class Embedding():
         
     def save_msi_dataset(
         self,
-        filename="emb_msi_dataset.h5ad"
+        filename="emb_msi_dataset.h5ad",
+        pdf_filename="embeddings_spatial.pdf",
+        plot_embeddings=False
     ):
         """
-        Save the current AnnData object to disk.
+        Save the current AnnData object to disk and optionally plot spatial embeddings.
 
         Parameters
         ----------
-        adata : sc.AnnData
-            The AnnData object containing MSI data.
         filename : str, optional
             File path to save the AnnData object.
+        pdf_filename : str, optional
+            File path to save the spatial embeddings PDF. Only used if plot_embeddings is True.
+        plot_embeddings : bool, optional
+            Whether to generate and save spatial embedding plots. Default is False.
         """
         
+        # Save AnnData object
         for k, v in list(self.adata.obsm.items()):
             if isinstance(v, pd.DataFrame):
                 self.adata.obsm[k] = v.values
         
         self.adata.write_h5ad(filename)
         
-    
+        # Plot spatial embeddings if requested
+        if plot_embeddings:
+            # Get embeddings to plot (prefer harmonized if available)
+            try:
+                embeddings = self.adata.obsm["X_Harmonized"]
+            except:
+                embeddings = self.adata.obsm["X_NMF"]
+            
+            # Convert embeddings to DataFrame if not already
+            if not isinstance(embeddings, pd.DataFrame):
+                embeddings_df = pd.DataFrame(embeddings, index=self.adata.obs_names)
+            else:
+                embeddings_df = embeddings
+            
+            # Get spatial coordinates
+            coords = self.adata.obs[['zccf', 'yccf', 'Section']].copy()
+            
+            # Get unique samples and their sections
+            samples = self.adata.obs['Sample'].unique()
+            max_sections = max(len(self.adata.obs[self.adata.obs['Sample'] == sample]['SectionID'].unique()) 
+                             for sample in samples)
+            
+            # Create PDF
+            with PdfPages(pdf_filename) as pdf:
+                # For each embedding direction
+                for emb_idx in tqdm(range(embeddings_df.shape[1]), desc="Plotting embeddings"):
+                    fig, axes = plt.subplots(len(samples), max_sections, 
+                                          figsize=(max_sections*2, len(samples)*2))
+                    
+                    # For each sample
+                    for sample_idx, sample in enumerate(samples):
+                        sample_data = self.adata[self.adata.obs['Sample'] == sample]
+                        sample_coords = coords.loc[sample_data.obs_names]
+                        sample_emb = embeddings_df.loc[sample_data.obs_names, emb_idx]
+                        
+                        # Get sections for this sample
+                        sections = sorted(sample_data.obs['SectionID'].unique())
+                        
+                        # For each section
+                        for section_idx, section in enumerate(sections):
+                            ax = axes[sample_idx, section_idx]
+                            
+                            # Get data for this section
+                            section_mask = sample_data.obs['SectionID'] == section
+                            section_coords = sample_coords[section_mask]
+                            section_emb = sample_emb[section_mask]
+                            
+                            # Plot
+                            scatter = ax.scatter(section_coords['zccf'], -section_coords['yccf'],
+                                              c=section_emb, cmap='PuOr', s=0.5, rasterized=True)
+                            
+                            # Remove spines and ticks
+                            ax.set_axis_off()
+                            ax.set_aspect('equal')
+                            
+                            # Set title for first row
+                            if sample_idx == 0:
+                                ax.set_title(f'Section {section}')
+                            
+                            # Set ylabel for first column
+                            if section_idx == 0:
+                                ax.set_ylabel(sample)
+                    
+                    # Remove empty subplots
+                    for i in range(len(samples)):
+                        for j in range(len(sections), max_sections):
+                            fig.delaxes(axes[i, j])
+                    
+                    # Add colorbar
+                    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+                    fig.colorbar(scatter, cax=cbar_ax)
+                    
+                    # Add title
+                    plt.suptitle(f'Embedding {emb_idx + 1}', y=0.95)
+                    
+                    # Adjust layout and save
+                    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
     def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
         self,
         filename="emb_msi_dataset.h5ad"

@@ -483,7 +483,9 @@ class Clustering:
                                 xgb_gamma=0.5,
                                 xgb_random_state=42,
                                 xgb_n_jobs=6,
-                                early_stopping_rounds=7):
+                                early_stopping_rounds=7,
+                                plot_dir="clustering_plots",
+                                do_plotting=False):
         """
         Learn a hierarchical bipartite clustering tree on the dataset.
         This is a self-supervised clustering method that recursively splits the dataset,
@@ -492,7 +494,11 @@ class Clustering:
 
         Parameters
         ----------
-        (all parameters as before)
+        plot_dir : str, optional
+            Directory to save the clustering plots. Default is "clustering_plots".
+        do_plotting : bool, optional
+            Whether to generate and save plots during clustering. Default is False.
+        (all other parameters as before)
 
         Returns
         -------
@@ -501,6 +507,115 @@ class Clustering:
         clusteringLOG : pd.DataFrame
             A DataFrame recording the split history.
         """
+        # Create plot directory if it doesn't exist
+        if do_plotting:
+            os.makedirs(plot_dir, exist_ok=True)
+
+            # Define global plotting parameters
+            global_min_z = self.coordinates['zccf'].min()
+            global_max_z = self.coordinates['zccf'].max()
+            global_min_y = -self.coordinates['yccf'].max()
+            global_max_y = -self.coordinates['yccf'].min()
+
+        def plot_spatial_localNMF(spat, nmf_top, path_str, splitlevel):
+            figs = []
+            for NMF_I in range(nmf_top.shape[1]):
+                results = []
+                filtered_data = pd.concat([
+                    pd.DataFrame(spat, columns=['zccf','yccf','Section']),
+                    pd.DataFrame(nmf_top[:,NMF_I], columns=["test"])
+                ], axis=1)
+
+                currentNMF = "test"
+                for section in filtered_data['Section'].unique():
+                    subset = filtered_data[filtered_data['Section'] == section]
+                    perc_2 = subset[currentNMF].quantile(0.02)
+                    perc_98 = subset[currentNMF].quantile(0.98)
+                    results.append([section, perc_2, perc_98])
+
+                percentile_df = pd.DataFrame(results, columns=['Section', '2-perc', '98-perc'])
+                med2p = percentile_df['2-perc'].median()
+                med98p = percentile_df['98-perc'].median()
+
+                cmap = plt.cm.PuOr
+                fig, axes = plt.subplots(4, 8, figsize=(20, 10))
+                axes = axes.flatten()
+
+                for section in range(1, 33):
+                    ax = axes[section - 1]
+                    ddf = filtered_data[(filtered_data['Section'] == section)]
+                    ax.scatter(ddf['zccf'], -ddf['yccf'], c=ddf[currentNMF], 
+                             cmap="PuOr", s=0.5, rasterized=True, vmin=med2p, vmax=med98p)
+                    ax.axis('off')
+                    ax.set_aspect('equal')
+                    ax.set_xlim(global_min_z, global_max_z)
+                    ax.set_ylim(global_min_y, global_max_y)
+
+                cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+                norm = Normalize(vmin=med2p, vmax=med98p)
+                sm = ScalarMappable(norm=norm, cmap=cmap)
+                fig.colorbar(sm, cax=cbar_ax)
+
+                plt.tight_layout(rect=[0, 0, 0.9, 1])
+                plot_path = os.path.join(plot_dir, f"split_{path_str}_level_{splitlevel}_NMF{NMF_I}.png")
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                figs.append(fig)
+            return figs
+
+        def plot_spatial_localNMF_kMeans(spat, kmeans_labels, path_str, splitlevel):
+            dd2 = pd.DataFrame(spat, columns=['zccf','yccf','Section'])
+            dd2['cat_code'] = pd.Series(np.array(kmeans_labels)).astype('category').cat.codes
+
+            color_map = {0: 'purple', 1: 'yellow'}
+            dd2['color'] = dd2['cat_code'].map(color_map)
+
+            fig, axes = plt.subplots(4, 8, figsize=(40, 20))
+            axes = axes.flatten()
+            dot_size = 0.3
+
+            for i, section_num in enumerate(range(1, 33)):
+                ax = axes[i]
+                xx = dd2[dd2["Section"] == section_num]
+                ax.scatter(xx['zccf'], -xx['yccf'],
+                         c=np.array(xx['color']), s=dot_size, alpha=1, rasterized=True)
+                ax.axis('off')
+                ax.set_aspect('equal')
+                ax.set_xlim(global_min_z, global_max_z)
+                ax.set_ylim(global_min_y, global_max_y)
+
+            for j in range(i+1, len(axes)):
+                fig.delaxes(axes[j])
+
+            plt.tight_layout()
+            plot_path = os.path.join(plot_dir, f"split_{path_str}_level_{splitlevel}_bipartition.png")
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            return fig
+
+        def plot_embeddingsNMF(embeddings, kmeans_labels, path_str, splitlevel):
+            figs = []
+            for i in range(embeddings.shape[1]-1):
+                fig = plt.figure(figsize=(10, 8))
+                plt.scatter(embeddings[:, i][::10], embeddings[:, (i+1)][::10], 
+                          c=kmeans_labels[::10], s=0.005, alpha=0.5, rasterized=True)
+                plot_path = os.path.join(plot_dir, f"split_{path_str}_level_{splitlevel}_embedding_{i}_{i+1}.png")
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                figs.append(fig)
+            return figs
+
+        def plot_tSNE(kmeans_labels, path_str, splitlevel):
+            fig = plt.figure(figsize=(10, 8))
+            plt.scatter(self.adata.obsm['X_TSNE'][:,0], self.adata.obsm['X_TSNE'][:,1], 
+                       s=0.0005, alpha=0.5, c="gray", rasterized=True)
+            plt.scatter(self.adata.obsm['X_TSNE'][:,0], self.adata.obsm['X_TSNE'][:,1], 
+                       s=0.005, alpha=1, c=kmeans_labels, rasterized=True)
+            plot_path = os.path.join(plot_dir, f"split_{path_str}_level_{splitlevel}_tsne.png")
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            return fig
+
         # 1) SPLIT INTO TRAIN/VAL/TEST BASED ON SECTIONS OR RANDOM
         unique_sections = self.coordinates['Section'].unique()
         num_sections = len(unique_sections)
@@ -641,6 +756,22 @@ class Clustering:
                 data_for_clustering.loc[
                     data_for_clustering['label'].isin(gr2), 'lab'
                 ] = 2
+
+                # Plot embeddings and bipartition
+                if do_plotting:
+                    path_str = "_".join(map(str, path)) if path else "root"
+                    
+                    # Plot spatial embeddings
+                    plot_spatial_localNMF(current_adata.obsm['spatial'], standardized_embeddings, path_str, splitlevel)
+                    
+                    # Plot embeddings NMF
+                    plot_embeddingsNMF(standardized_embeddings, kmeans_labels, path_str, splitlevel)
+                    
+                    # Plot spatial bipartition
+                    plot_spatial_localNMF_kMeans(current_adata.obsm['spatial'], data_for_clustering['lab'], path_str, splitlevel)
+                    
+                    # Plot tSNE
+                    plot_tSNE(kmeans_labels, path_str, splitlevel)
 
                 # Continuity check
                 (enough_sections0,

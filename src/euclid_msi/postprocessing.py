@@ -4,7 +4,7 @@ This module implements various postprocessing steps on the AnnData object produc
 The functionalities include:
   - XGBoost‐based imputation (feature restoration)
   - 3D anatomical interpolation
-  - (Placeholder) Training a variational autoencoder (“lipimap”)
+  - (Placeholder) Training a variational autoencoder ("lipimap")
   - Registering an additional modality
   - Comparing parcellations between modalities
   - Running a multiomics factor analysis (MOFA) and subsequent tSNE
@@ -177,7 +177,7 @@ class Postprocessing:
         import joblib
         """
         Impute lipid values on sections where measurement failed using XGBoost regression.
-        Uses Moran’s I and user-defined thresholds to decide which lipids to restore.
+        Uses Moran's I and user-defined thresholds to decide which lipids to restore.
     
         This function:
         1. Selects "restorable" features based on `moran_threshold`.
@@ -200,7 +200,7 @@ class Postprocessing:
                 - self.embeddings: pd.DataFrame representing features (embeddings) per pixel.
                 - self.coordinates: pd.DataFrame with coordinate and 'SectionID' information per pixel.
         moran_threshold : float, default=0.4
-            The Moran’s I threshold used to decide which features (lipids) are initially restorable.
+            The Moran's I threshold used to decide which features (lipids) are initially restorable.
         usage_threshold : float, default=0.4
             Threshold passed to `top_3_above_threshold` to decide if a value is "good" for usage.
         usage_top_n : int, default=3
@@ -231,7 +231,7 @@ class Postprocessing:
 
         self.embeddings = pd.DataFrame(self.embeddings, index=self.pixels.index)
     
-        # 1) Determine which features (lipids) are restorable based on Moran’s I threshold
+        # 1) Determine which features (lipids) are restorable based on Moran's I threshold
         isitrestorable = (self.morans > moran_threshold).sum(axis=1).sort_values()
         torestore = isitrestorable[isitrestorable > 3].index ######################################################################################################################
     
@@ -267,7 +267,7 @@ class Postprocessing:
         # Keep only rows where the sum is above `usage_sum_threshold`
         usage_dataframe = usage_dataframe.loc[usage_dataframe.sum(axis=1) > usage_sum_threshold, :]
         
-        usage_dataframe = usage_dataframe.iloc[:2,:] ############################
+        #usage_dataframe = usage_dataframe.iloc[:2,:] ############################
         print(usage_dataframe)
     
         # Select corresponding lipids to restore
@@ -735,3 +735,157 @@ class Postprocessing:
             plt.suptitle(f"Spatial module: {cluster}")
             plt.show()
         return None
+
+    def add_lipid_programs_from_parquet(self, parquet_file: str) -> None:
+        """
+        Add lipid programs from a parquet file to adata.obsm['X_lipiMap'], matching on Path, x, y.
+        The lipid programs file must have columns: Path, x, y, and the program columns.
+        Matching logic is the same as preprocessing's add_metadata_from_parquet.
+        """
+        # Load lipid programs from parquet
+        lipid_df = pd.read_parquet(parquet_file)
+
+        # Standardize types before creating composite keys
+        self.adata.obs['Path'] = self.adata.obs['Path'].astype(str).str.strip()
+        lipid_df['Path'] = lipid_df['Path'].astype(str).str.strip()
+        self.adata.obs['x'] = self.adata.obs['x'].astype(int)
+        lipid_df['x'] = lipid_df['x'].astype(int)
+        self.adata.obs['y'] = self.adata.obs['y'].astype(int)
+        lipid_df['y'] = lipid_df['y'].astype(int)
+
+        # Create composite keys
+        adata_key = self.adata.obs[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+        lipid_key = lipid_df[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+
+        # Find common entries
+        common_keys = adata_key[adata_key.isin(lipid_key)]
+
+        # Filter adata to keep only matching observations
+        self.adata = self.adata[adata_key.isin(common_keys)].copy()
+        adata_key = adata_key[adata_key.isin(common_keys)]
+
+        # Get only program columns (exclude Path, x, y)
+        program_cols = [col for col in lipid_df.columns if col not in ['Path', 'x', 'y']]
+        # Map composite key to program values (as a row)
+        program_map = lipid_df.set_index(lipid_key)[program_cols].to_dict(orient='index')
+        # Build matrix for adata order
+        X_lipiMap = np.stack([np.array(list(program_map[k].values())) for k in adata_key])
+        self.adata.obsm['X_lipiMap'] = X_lipiMap
+        self.adata.uns['lipiMap_names'] = program_cols
+        print(f"Added lipid programs to adata.obsm['X_lipiMap'] with shape {X_lipiMap.shape}")
+
+    def add_modality_from_parquet(self, parquet_file: str, X_name: str) -> None:
+        """
+        Add a new modality (e.g., gene expression, proteins) from a parquet file to adata.obsm[X_name], matching on Path, x, y.
+        The modality file must have columns: Path, x, y, and the feature columns.
+        Unmatched adata entries are filled with NaNs.
+        The feature names are stored in adata.uns[X_name + '_names'].
+        """
+        # Load modality data from parquet
+        modality_df = pd.read_parquet(parquet_file)
+
+        # Standardize types before creating composite keys
+        self.adata.obs['Path'] = self.adata.obs['Path'].astype(str).str.strip()
+        modality_df['Path'] = modality_df['Path'].astype(str).str.strip()
+        self.adata.obs['x'] = self.adata.obs['x'].astype(int)
+        modality_df['x'] = modality_df['x'].astype(int)
+        self.adata.obs['y'] = self.adata.obs['y'].astype(int)
+        modality_df['y'] = modality_df['y'].astype(int)
+
+        # Create composite keys
+        adata_key = self.adata.obs[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+        modality_key = modality_df[['Path', 'x', 'y']].apply(
+            lambda row: f"{row['Path']}_{row['x']}_{row['y']}", axis=1
+        )
+
+        # Get only feature columns (exclude Path, x, y)
+        feature_cols = [col for col in modality_df.columns if col not in ['Path', 'x', 'y']]
+        feature_names = feature_cols
+        modality_map = modality_df.set_index(modality_key)[feature_cols].to_dict(orient='index')
+
+        # Build matrix for adata order, fill with NaN if not present
+        X_modality = np.full((self.adata.n_obs, len(feature_cols)), np.nan)
+        for i, k in enumerate(adata_key):
+            if k in modality_map:
+                X_modality[i, :] = np.array(list(modality_map[k].values()))
+        self.adata.obsm[X_name] = X_modality
+        self.adata.uns[X_name + '_names'] = feature_names
+        print(f"Added modality '{X_name}' to adata.obsm with shape {X_modality.shape}")
+
+    def evaluate_interindividual_variation(self, subject_col: str = 'Sample', subclass_col: str = None):
+        """
+        Evaluate inter-individual variation (ICC) for each lipid in adata.X.
+        Optionally stratifies by a subclass column (e.g., lipid subclass).
+
+        Parameters
+        ----------
+        subject_col : str, optional
+            Column in adata.obs identifying individuals (default 'Sample').
+        subclass_col : str, optional
+            Column in adata.obs for stratification (e.g., 'subclass').
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame of ICC values (lipids × subclasses if stratified, else lipids).
+        """
+        import pandas as pd
+        import numpy as np
+
+        def compute_icc(df, subject_col, measurement_col):
+            group_stats = df.groupby(subject_col)[measurement_col].agg(['mean', 'count'])
+            means = group_stats['mean']
+            counts = group_stats['count']
+            grand_mean = df[measurement_col].mean()
+            ss_between = (counts * (means - grand_mean)**2).sum()
+            N = len(df)
+            J = len(means)
+            df_between = J - 1
+            ms_between = ss_between / df_between if df_between > 0 else np.nan
+            ss_within = ((df.groupby(subject_col)[measurement_col].transform('mean') - df[measurement_col])**2).sum()
+            df_within = N - J
+            ms_within = ss_within / df_within if df_within > 0 else np.nan
+            n_bar = counts.mean()
+            sigma_b2 = (ms_between - ms_within) / n_bar if n_bar > 0 else np.nan
+            sigma_w2 = ms_within
+            icc = sigma_b2 / (sigma_b2 + sigma_w2) if (sigma_b2 + sigma_w2) != 0 else np.nan
+            return icc
+
+        X = self.adata.X
+        obs = self.adata.obs.copy()
+        lipid_names = list(self.adata.var_names)
+
+        results = []
+        if subclass_col is not None:
+            subclasses = obs[subclass_col].unique()
+            for subclass in subclasses:
+                mask = obs[subclass_col] == subclass
+                for i, lipid in enumerate(lipid_names):
+                    vals = X[mask.values, i]
+                    df = pd.DataFrame({subject_col: obs.loc[mask, subject_col], 'value': vals})
+                    df = df.dropna()
+                    if df[subject_col].nunique() < 2:
+                        icc = np.nan
+                    else:
+                        icc = compute_icc(df, subject_col, 'value')
+                    results.append({'lipid': lipid, 'subclass': subclass, 'icc': icc})
+            icc_df = pd.DataFrame(results).pivot(index='lipid', columns='subclass', values='icc')
+        else:
+            for i, lipid in enumerate(lipid_names):
+                vals = X[:, i]
+                df = pd.DataFrame({subject_col: obs[subject_col], 'value': vals})
+                df = df.dropna()
+                if df[subject_col].nunique() < 2:
+                    icc = np.nan
+                else:
+                    icc = compute_icc(df, subject_col, 'value')
+                results.append({'lipid': lipid, 'icc': icc})
+            icc_df = pd.DataFrame(results).set_index('lipid')['icc']
+        print("ICC calculation complete. DataFrame shape:", icc_df.shape)
+        return icc_df
