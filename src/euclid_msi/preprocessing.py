@@ -475,7 +475,7 @@ class Preprocessing:
 
         # Plot histogram of all ppm values (LIPIDMAPS and USER if available)
         all_ppms = pd.Series(peaks_df['ppm_USER'], name='ppm_USER')
-        all_ppms = all_ppms.melt(value_name='ppm')['ppm'].dropna()
+        all_ppms = pd.DataFrame(all_ppms).melt(value_name='ppm')['ppm'].dropna()
         plt.figure(figsize=(7,4))
         plt.hist(all_ppms, bins=50, color='dodgerblue', alpha=0.7)
         plt.xlabel('ppm error')

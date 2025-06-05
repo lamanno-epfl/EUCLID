@@ -149,6 +149,8 @@ class Clustering:
 
         self.adatamaia.obsm['lipids'] = normalized_datemp
 
+        self.adatamaia.obsm['X_TSNE'] = emb.adata.obsm['X_TSNE']
+
     # -------------------------------------------------------------------------
     # BLOCK 1: Conventional Leiden clustering on harmonized NMF embeddings
     # -------------------------------------------------------------------------
@@ -175,7 +177,6 @@ class Clustering:
         except:
             sc.pp.neighbors(self.adata, use_rep="X_NMF")
         sc.tl.leiden(self.adata, resolution=resolution, key_added=key_added)
-        return self.adata
 
     # -------------------------------------------------------------------------
     # Utility functions (internal)
@@ -605,11 +606,14 @@ class Clustering:
                 figs.append(fig)
             return figs
 
-        def plot_tSNE(kmeans_labels, path_str, splitlevel):
+        def plot_tSNE(kmeans_labels, path_str, splitlevel, current_adata):
             fig = plt.figure(figsize=(10, 8))
+            # Plot all points in gray
             plt.scatter(self.adata.obsm['X_TSNE'][:,0], self.adata.obsm['X_TSNE'][:,1], 
                        s=0.0005, alpha=0.5, c="gray", rasterized=True)
-            plt.scatter(self.adata.obsm['X_TSNE'][:,0], self.adata.obsm['X_TSNE'][:,1], 
+            # Plot only the points corresponding to current_adata
+            plt.scatter(self.adata[current_adata.obs_names].obsm['X_TSNE'][:,0], 
+                       self.adata[current_adata.obs_names].obsm['X_TSNE'][:,1], 
                        s=0.005, alpha=1, c=kmeans_labels, rasterized=True)
             plot_path = os.path.join(plot_dir, f"split_{path_str}_level_{splitlevel}_tsne.png")
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
@@ -765,13 +769,13 @@ class Clustering:
                     plot_spatial_localNMF(current_adata.obsm['spatial'], standardized_embeddings, path_str, splitlevel)
                     
                     # Plot embeddings NMF
-                    plot_embeddingsNMF(standardized_embeddings, kmeans_labels, path_str, splitlevel)
+                    plot_embeddingsNMF(standardized_embeddings, data_for_clustering['lab'], path_str, splitlevel)
                     
                     # Plot spatial bipartition
                     plot_spatial_localNMF_kMeans(current_adata.obsm['spatial'], data_for_clustering['lab'], path_str, splitlevel)
                     
                     # Plot tSNE
-                    plot_tSNE(kmeans_labels, path_str, splitlevel)
+                    plot_tSNE(data_for_clustering['lab'], path_str, splitlevel, current_adata)
 
                 # Continuity check
                 (enough_sections0,
@@ -1251,3 +1255,57 @@ class Clustering:
         merger.write(final_pdf)
         merger.close()
         print(f"Merged PDF saved as {final_pdf}")
+
+    def compare_leiden_lipizone(self, leiden_key="X_Leiden2", lipizone_key="lipizone", output_file=None):
+        """
+        Compare Leiden clustering results with lipizone annotations.
+        
+        Parameters
+        ----------
+        leiden_key : str, optional
+            Key in adata.obs containing Leiden clustering results
+        lipizone_key : str, optional
+            Key in adata.obs containing lipizone annotations
+        output_file : str, optional
+            Path to save the output visualization. If None, plot is shown but not saved.
+            
+        Returns
+        -------
+        pd.DataFrame
+            The normalized contingency matrix showing the relationship between
+            Leiden clusters and lipizones
+        """
+        # Create contingency matrix
+        cm = pd.crosstab(self.adata.obs[leiden_key], self.adata.obs[lipizone_key])
+        
+        # Calculate fractions
+        fraction = cm / cm.sum()
+        
+        # Perform hierarchical clustering
+        import scipy.cluster.hierarchy as sch
+        
+        # Cluster columns (lipizones)
+        linkage = sch.linkage(sch.distance.pdist(fraction.T), method='weighted', optimal_ordering=True)
+        order = sch.leaves_list(linkage)
+        df = fraction.iloc[:, order]
+        
+        # Cluster rows (Leiden clusters)
+        order = np.argmax(df.values, axis=1)
+        order = np.argsort(order)
+        df = df.iloc[order,:]
+        
+        # Create visualization
+        plt.figure(figsize=(10, 8))
+        plt.imshow(df.T, cmap="Reds", vmax=0.5)
+        plt.colorbar(label='Fraction')
+        plt.xlabel('Leiden Clusters')
+        plt.ylabel('Lipizones')
+        plt.title('Relationship between Leiden Clusters and Lipizones')
+        
+        if output_file:
+            plt.savefig(output_file, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+            
+        return df

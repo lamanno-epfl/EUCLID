@@ -28,10 +28,13 @@ from pathlib import Path
 from matplotlib.backends.backend_pdf import PdfPages
 from pathlib import Path
 from PyPDF2 import PdfMerger
+import os
+import scanpy as sc
+from jax.nn import sigmoid
+from scipy.special import expit
 
-
-PDF_DIR = Path("pregnancy_firstalltrain_pdfs")
-PDF_DIR.mkdir(exist_ok=True)
+CASECONTROL_DIR = Path(os.getcwd()) / "casecontrol_analysis"
+CASECONTROL_DIR.mkdir(exist_ok=True)
 
 # Cell 2: Dashboard for configurable hyperparameters
 class LipidAnalysisConfig:
@@ -1158,3 +1161,254 @@ def main(sub_alldata, coords, config):
             return _pd.DataFrame(rows)
     
     return results
+
+# --- New API function ---
+def run_case_control_analysis(
+    adata: sc.AnnData,
+    lipids_to_analyze,
+    learning_rate=0.05,
+    num_epochs=2000,
+    adaptive_lr=False,
+    supertype_prior_std=1.0,
+    supertype_susceptibility_prior_std=1.0,
+    sample_prior_std=1.0,
+    section_prior_std=5.0,
+    downsampling=1,
+    random_seed=42,
+    normalize_percentiles=(0.1, 99.9),
+    guide_supertype_unconst_scale=0.1,
+    guide_supertype_susceptibility_scale=0.1,
+    x_col="x",
+    y_col="y",
+    sectionid_col="SectionID",
+    sample_col="Sample",
+    condition_col="Condition",
+    supertype_col="supertype",
+    verbose=True
+):
+    """
+    Run case-control analysis on an AnnData object and save all outputs to 'casecontrol_analysis'.
+    """
+    import pandas as pd
+    # Extract obs and relevant columns
+    obs = adata.obs.copy()
+    # Extract lipid intensities (assume adata.var_names matches columns in adata.X)
+    lipid_df = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
+    # Merge obs and lipid intensities
+    df = pd.concat([obs, lipid_df], axis=1)
+    # Check required columns
+    for col in [x_col, y_col, sectionid_col, sample_col, condition_col, supertype_col]:
+        if col not in df.columns:
+            raise ValueError(f"Required column '{col}' not found in AnnData.obs.")
+    # Prepare coords DataFrame for spatial splitting
+    coords = df[[x_col, y_col, sectionid_col]].copy()
+    coords.columns = ["x", "y", "SectionID"]
+    # Prepare config object
+    class Config:
+        pass
+    config = Config()
+    config.lipids_to_analyze = lipids_to_analyze
+    config.learning_rate = learning_rate
+    config.num_epochs = num_epochs
+    config.adaptive_lr = adaptive_lr
+    config.supertype_prior_std = supertype_prior_std
+    config.supertype_susceptibility_prior_std = supertype_susceptibility_prior_std
+    config.sample_prior_std = sample_prior_std
+    config.section_prior_std = section_prior_std
+    config.downsampling = downsampling
+    config.random_seed = random_seed
+    config.normalize_percentiles = normalize_percentiles
+    config.guide_supertype_unconst_scale = guide_supertype_unconst_scale
+    config.guide_supertype_susceptibility_scale = guide_supertype_susceptibility_scale
+    # Patch global config reference if needed
+    global CASECONTROL_DIR
+    global PDF_DIR
+    PDF_DIR = CASECONTROL_DIR
+    # Run main analysis
+    results = main(df, coords, config)
+    if verbose:
+        print(f"All outputs saved to: {CASECONTROL_DIR}")
+    return results
+
+def summarize_case_control_results(
+    adata,
+    lipids_to_analyze,
+    supertypes=None,
+    model_dir=None,
+    normalize_percentiles=(0.1, 99.9),
+    output_prefix="pregnancy"
+):
+    """
+    Summarize case-control model results for a set of lipids and supertypes.
+    Saves shift, baseline, and foldchange as parquet files in the casecontrol_analysis directory.
+    """
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+
+    if supertypes is None:
+        supertypes = np.sort(adata.obs['supertype'].unique())
+    if model_dir is None:
+        model_dir = CASECONTROL_DIR
+    else:
+        model_dir = Path(model_dir)
+    aaaa_list, bbbb_list, lipid_names = [], [], []
+
+    for lipid in tqdm(lipids_to_analyze):
+        param_path = model_dir / f"{lipid}_model_params.npy"
+        if not param_path.exists():
+            print(f"Warning: {param_path} not found, skipping.")
+            continue
+        params = np.load(param_path, allow_pickle=True).item()
+        # Baseline: sigmoid of unconst
+        baseline = pd.DataFrame(
+            sigmoid(params['alpha_supertype_unconst_loc']),
+            index=supertypes, columns=[lipid]
+        )
+        # Shift: susceptibility
+        shift = pd.DataFrame(
+            params['alpha_supertype_susceptibility_loc'],
+            index=supertypes, columns=[lipid]
+        )
+        aaaa_list.append(shift)
+        bbbb_list.append(baseline)
+        lipid_names.append(lipid)
+
+    # Concatenate across lipids
+    shift_df = pd.concat(aaaa_list, axis=1)
+    baseline_df = pd.concat(bbbb_list, axis=1)
+    shift_df.columns = lipid_names
+    baseline_df.columns = lipid_names
+
+    # Compute fold change
+    foldchange_df = shift_df / baseline_df
+
+    # Save results
+    shift_df.to_parquet(model_dir / f"shift_{output_prefix}.parquet")
+    baseline_df.to_parquet(model_dir / f"baseline_{output_prefix}.parquet")
+    foldchange_df.to_parquet(model_dir / f"foldchange_{output_prefix}.parquet")
+
+    print(f"Saved shift, baseline, and foldchange to {model_dir}")
+    return shift_df, baseline_df, foldchange_df
+
+def summarize_xsupertypes(
+    adata,
+    lipids_to_analyze,
+    supertypes=None,
+    model_dir=None,
+    output_prefix="pregnancy",
+    baseline_condition="naive",
+    upreg_threshold=0.2,
+    prob_threshold=0.98,
+    n_samples=1000
+):
+    """
+    For each lipid, compute upregulated, downregulated, and expressed supertypes using model parameter files.
+    Returns four DataFrames: upreg, downreg, expressed, and their union (all supertypes with any shift),
+    as well as lists: mean_score, ci_lowers, ci_uppers for the fraction of expressed supertypes that are also shifted (with 95% bootstrap CI).
+    Saves all as parquet files in the casecontrol_analysis directory.
+    """
+    import numpy as np
+    import pandas as pd
+    from tqdm import tqdm
+    from pathlib import Path
+    from scipy.special import expit
+
+    if supertypes is None:
+        supertypes = np.sort(adata.obs['supertype'].unique())
+    if model_dir is None:
+        model_dir = CASECONTROL_DIR
+    else:
+        model_dir = Path(model_dir)
+
+    lipid_upreg_xsupertypes = []
+    lipid_downreg_xsupertypes = []
+    lipid_expressed_xsupertypes = []
+    lipid_names = []
+
+    for lipid in tqdm(lipids_to_analyze):
+        param_path = model_dir / f"{lipid}_model_params.npy"
+        if not param_path.exists():
+            print(f"Warning: {param_path} not found, skipping.")
+            continue
+        params = np.load(param_path, allow_pickle=True).item()
+        loc_susc = params['alpha_supertype_susceptibility_loc']
+        scale_susc = params['alpha_supertype_susceptibility_scale']
+        loc_unconst = params['alpha_supertype_unconst_loc']
+        scale_unconst = params['alpha_supertype_unconst_scale']
+
+        # Draw samples for shift and baseline
+        samples_shift = np.random.default_rng(1234).normal(
+            loc=loc_susc[None, :],
+            scale=scale_susc[None, :],
+            size=(n_samples, loc_susc.shape[0])
+        )
+        samples_unconst = np.random.default_rng(1234).normal(
+            loc=loc_unconst[None, :],
+            scale=scale_unconst[None, :],
+            size=(n_samples, loc_unconst.shape[0])
+        )
+        samples_baseline = expit(samples_unconst)
+
+        # Upregulation: shift > threshold * baseline
+        upregulation = samples_shift > (upreg_threshold * samples_baseline)
+        downregulation = -samples_shift > (upreg_threshold * samples_baseline)
+        expressed = samples_baseline > 0.05
+
+        lipid_upreg_xsupertypes.append((np.mean(upregulation, axis=0) > prob_threshold).astype(float))
+        lipid_downreg_xsupertypes.append((np.mean(downregulation, axis=0) > prob_threshold).astype(float))
+        lipid_expressed_xsupertypes.append((np.mean(expressed, axis=0) > prob_threshold).astype(float))
+        lipid_names.append(lipid)
+
+    stindex = supertypes
+    lipid_upreg_xsupertypes_df = pd.DataFrame(lipid_upreg_xsupertypes, columns=stindex, index=lipid_names)
+    lipid_downreg_xsupertypes_df = pd.DataFrame(lipid_downreg_xsupertypes, columns=stindex, index=lipid_names)
+    lipid_expressed_xsupertypes_df = pd.DataFrame(lipid_expressed_xsupertypes, columns=stindex, index=lipid_names)
+    shifted_xsupertypes_df = lipid_upreg_xsupertypes_df | lipid_downreg_xsupertypes_df
+
+    # Save results
+    lipid_upreg_xsupertypes_df.to_parquet(model_dir / f"upreg_xsupertypes_{output_prefix}.parquet")
+    lipid_downreg_xsupertypes_df.to_parquet(model_dir / f"downreg_xsupertypes_{output_prefix}.parquet")
+    lipid_expressed_xsupertypes_df.to_parquet(model_dir / f"expressed_xsupertypes_{output_prefix}.parquet")
+    shifted_xsupertypes_df.to_parquet(model_dir / f"shifted_xsupertypes_{output_prefix}.parquet")
+
+    print(f"Saved upreg, downreg, expressed, and shifted xsupertypes to {model_dir}")
+
+    # --- Downstream: Bootstrap mean and CI for fraction of expressed supertypes that are also shifted ---
+    mean_score = []
+    ci_lowers = []
+    ci_uppers = []
+    for yyy in tqdm(range(lipid_expressed_xsupertypes_df.shape[0])):
+        exp = lipid_expressed_xsupertypes_df.iloc[yyy, :].values
+        shif = shifted_xsupertypes_df.iloc[yyy, :].values
+        n, B = len(exp), 10000
+        rng = np.random.default_rng(42)
+        # Bootstrap replicates
+        scores = [
+            (exp[idx] & shif[idx]).sum() / exp[idx].sum() if exp[idx].sum() > 0 else 0.0
+            for idx in rng.integers(0, n, size=(B, n))
+        ]
+        # Point estimate and 95% CI
+        mean_score.append(np.mean(scores))
+        ci_lower, ci_upper = np.percentile(scores, [2.5, 97.5])
+        ci_lowers.append(ci_lower)
+        ci_uppers.append(ci_upper)
+
+    return (
+        lipid_upreg_xsupertypes_df,
+        lipid_downreg_xsupertypes_df,
+        lipid_expressed_xsupertypes_df,
+        shifted_xsupertypes_df,
+        mean_score,
+        ci_lowers,
+        ci_uppers
+    )
+
+# --- Usage example ---
+# from euclid_msi.euclid_casecontrol import summarize_xsupertypes
+# upreg, downreg, expressed, shifted, mean_score, ci_lowers, ci_uppers = summarize_xsupertypes(
+#     adata,
+#     lipids_to_analyze=["PC 38:6", "HexCer 40:1;O2"],
+#     output_prefix="pregnancy"
+# )
+
