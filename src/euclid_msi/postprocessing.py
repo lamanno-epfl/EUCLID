@@ -49,6 +49,7 @@ import scipy.cluster.hierarchy as sch
 from kneed import KneeLocator
 from numba import njit
 from scipy import ndimage
+from euclid_msi.plotting import Plotting
 
 # Set thread limits and suppress warnings
 threadpool_limits(limits=8)
@@ -146,6 +147,27 @@ class Postprocessing:
         self.coordinates = self.pixels[['SectionID', 'x', 'y']]
         self.reference_image = reference_image
         self.annotation_image = annotation_image
+
+    def save_msi_dataset(
+        self,
+        filename="msi_dataset_postprocessing_ops.h5ad"):
+        """
+        Save the current AnnData object to disk, including any postprocessing results.
+
+        Parameters
+        ----------
+        filename : str, optional
+            File path to save the AnnData object.
+        save_embeddings : bool, optional
+            Whether to save the harmonized embeddings in the AnnData object.
+        save_restored_features : bool, optional
+            Whether to save any restored features from XGBoost imputation.
+        """
+        # Create a copy of the AnnData object to avoid modifying the original
+        adata_to_save = self.adata.copy()
+        
+        # Save the AnnData object
+        adata_to_save.write_h5ad(filename)
 
     # -------------------------------------------------------------------------
     # BLOCK 1: XGBoost Feature Restoration
@@ -280,12 +302,14 @@ class Postprocessing:
         coords["SectionID"] = coords["SectionID"].astype(float).astype(int).astype(str)
     
         metrics_df = pd.DataFrame(columns=["train_pearson_r", "train_rmse", "val_pearson_r", "val_rmse"])
-    
+
+        usage_str_index = usage_dataframe.index.astype(float).astype(str)
+
+        mask = usage_str_index.isin(lipids_to_restore.columns)
+        usage_dataframe = usage_dataframe.loc[usage_dataframe.index[mask]]
+
         # 3) Loop over features in usage_dataframe to train a model for each
         for index, row in tqdm(usage_dataframe.iterrows(), total=usage_dataframe.shape[0], desc="XGB Restoration"):
-            
-            print(index)
-            
             # For each lipid feature index, gather sections that are True in usage_dataframe
             train_sections_all = row[row].index.tolist()
             if len(train_sections_all) < min_sections_for_training:
@@ -361,13 +385,15 @@ class Postprocessing:
         valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index.astype(float).astype(str)
         coords_pred = coords_pred.loc[:, list(coords_pred.columns[:len(self.coordinates.columns)]) + list(valid_features)]
 
+        # Store the restored features in obsm and their names in uns
         self.adata.obsm['X_restored'] = coords_pred.iloc[:, 3:].values
+        self.adata.uns['restored_feature_names'] = coords_pred.iloc[:, 3:].columns.tolist()
 
 
     # -------------------------------------------------------------------------
     # BLOCK 2: Anatomical Interpolation
     # -------------------------------------------------------------------------
-    def anatomical_interpolation(self, lipids, output_dir="3d_interpolated_native", w=5):
+    def anatomical_interpolation(self, lipids, output_dir="3d_interpolated_native", w=50):
         """
         For each lipid (by name) in the given list, perform 3D anatomical interpolation.
         Uses the provided reference_image and annotation_image.
@@ -383,32 +409,58 @@ class Postprocessing:
             Threshold value used for cleaning.
         """
         os.makedirs(output_dir, exist_ok=True)
-        # Assume pixels is a DataFrame (self.pixels) containing at least columns: 'xccf', 'yccf', 'zccf', and each lipid.
+        
+        # Get lipid data from X
+        lipid_data = pd.DataFrame(
+            self.adata.X,
+            index=self.adata.obs.index,
+            columns=self.adata.var_names
+        )
+        
+        # Add spatial coordinates
+        lipid_data = pd.concat([
+            lipid_data,
+            self.adata.obs[["xccf", "yccf", "zccf"]]
+        ], axis=1)
+        
         for lipid in tqdm(lipids, desc="3D Anatomical Interpolation"):
             try:
-                lipid_data = self.pixels[["xccf", "yccf", "zccf", lipid]].copy()
+                if lipid not in lipid_data.columns:
+                    print(f"Warning: {lipid} not found in data columns")
+                    continue
+                    
+                # Get data for this lipid
+                data = lipid_data[["xccf", "yccf", "zccf", lipid]].copy()
+                
                 # Log-transform the intensity
-                lipid_data[lipid] = np.log(lipid_data[lipid])
+                data[lipid] = np.log(data[lipid])
+                
                 # Scale spatial coordinates
-                lipid_data["xccf"] *= 10
-                lipid_data["yccf"] *= 10
-                lipid_data["zccf"] *= 10
+                data["xccf"] *= 10
+                data["yccf"] *= 10
+                data["zccf"] *= 10
+                
                 tensor_shape = self.reference_image.shape
                 tensor = np.full(tensor_shape, np.nan)
                 intensity_values = defaultdict(list)
-                for _, row in lipid_data.iterrows():
+                
+                for _, row in data.iterrows():
                     x, y, z = int(row["xccf"]) - 1, int(row["yccf"]) - 1, int(row["zccf"]) - 1
                     intensity_values[(x, y, z)].append(row[lipid])
+                    
                 for coords, values in intensity_values.items():
                     x, y, z = coords
                     if 0 <= x < tensor_shape[0] and 0 <= y < tensor_shape[1] and 0 <= z < tensor_shape[2]:
                         tensor[x, y, z] = np.nanmean(values)
+                        
                 normalized_tensor = normalize_to_255(tensor)
                 non_nan_mask = ~np.isnan(normalized_tensor)
                 normalized_tensor[non_nan_mask & (normalized_tensor < w)] = np.nan
                 normalized_tensor[self.reference_image < 4] = 0
+                
                 # Interpolation
                 interpolated = fill_array_interpolation(self.annotation_image, normalized_tensor)
+                
                 # Clean by convolution
                 kernel = np.ones((10, 10, 10))
                 array_filled = np.where(np.isnan(interpolated), 0, interpolated)
@@ -417,6 +469,7 @@ class Postprocessing:
                 convolved = ndimage.convolve(array_filled, kernel, mode='constant', cval=0.0)
                 avg = np.where(counts > 0, convolved / counts, np.nan)
                 filled = np.where(np.isnan(interpolated), avg, interpolated)
+                
                 np.save(os.path.join(output_dir, f"{lipid}_interpolation_log.npy"), filled)
             except Exception as e:
                 print(f"Error processing {lipid}: {e}")
@@ -889,3 +942,196 @@ class Postprocessing:
             icc_df = pd.DataFrame(results).set_index('lipid')['icc']
         print("ICC calculation complete. DataFrame shape:", icc_df.shape)
         return icc_df
+
+    def create_lipidome_matrix(self, final_table, min_score=4.0):
+        """
+        Create a new obsm slot 'X_lipidome' by combining native and restored features with lipid names.
+        
+        Parameters
+        ----------
+        final_table : pd.DataFrame
+            DataFrame containing lipid annotations, indexed by m/z values
+        min_score : float, optional
+            Minimum score required to keep a lipid annotation (default: 4.0)
+            
+        Returns
+        -------
+        None
+            Updates self.adata in place by adding X_lipidome to obsm
+        """
+        import pandas as pd
+        import numpy as np
+        
+        # 1. Get restored feature names and their corresponding data
+        restored_names = self.adata.uns['restored_feature_names']
+        restored_data = self.adata.obsm['X_restored']
+        
+        # 2. Create a mapping of m/z to lipid names using the same criteria as rename_features
+        name_map = {}
+        score_map = final_table['Score'].to_dict()
+        
+        for mz in restored_names:
+            if mz in final_table.index:
+                # Check score threshold
+                if pd.notna(score_map.get(mz)) and score_map[mz] >= min_score:
+                    annotation = final_table.loc[mz, 'AnnotationLCMSPrioritized']
+                    if pd.notna(annotation) and annotation != '_db':
+                        name_map[mz] = str(annotation)
+        
+        # 3. Filter restored features to keep only those with valid lipid names
+        # and not already in var_names
+        existing_names = set(self.adata.var_names)
+        valid_indices = []
+        valid_names = []
+        
+        for i, mz in enumerate(restored_names):
+            if mz in name_map and name_map[mz] not in existing_names:
+                valid_indices.append(i)
+                valid_names.append(name_map[mz])
+        
+        # 4. Create the lipidome matrix by concatenating X and filtered X_restored
+        X_native = self.adata.X
+        X_restored_filtered = restored_data[:, valid_indices]
+        
+        # Combine matrices
+        X_lipidome = np.hstack([X_native, X_restored_filtered])
+        
+        # Create combined feature names
+        lipidome_names = list(self.adata.var_names) + valid_names
+        
+        # Store in adata
+        self.adata.obsm['X_lipidome'] = X_lipidome
+        self.adata.uns['lipidome_names'] = lipidome_names
+        
+        print(f"Created X_lipidome with shape {X_lipidome.shape}")
+        print(f"Added {len(valid_names)} new lipid features from restored data")
+
+    def plot_all_annotated_lipids(self, final_table, output_dir="all_annotated_lipids"):
+        """
+        Create individual PDF plots for each lipid in X_lipidome, showing their spatial distribution
+        and metadata including name, source (X or X_restored), m/z value, and quality scores.
+        
+        Parameters
+        ----------
+        final_table : pd.DataFrame
+            DataFrame containing lipid annotations and scores
+        output_dir : str, optional
+            Directory to save the PDF plots (default: "all_annotated_lipids")
+        """
+        import os
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import pandas as pd
+        import numpy as np
+        import math
+        from tqdm import tqdm
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Get lipid names and their source (X or X_restored)
+        native_names = list(self.adata.var_names)
+        restored_names = self.adata.uns['lipidome_names'][len(native_names):]
+        
+        # Create a mapping of lipid names to their source and m/z values
+        lipid_info = {}
+        
+        # Map native features using old_feature_names
+        for i, name in enumerate(native_names):
+            mz = self.adata.var['old_feature_names'][i]
+            lipid_info[name] = {'source': 'X', 'mz': mz, 'idx': i}
+        
+        # Map restored features using restored_feature_names
+        for i, name in enumerate(restored_names):
+            mz = self.adata.uns['restored_feature_names'][i]
+            lipid_info[name] = {'source': 'X_restored', 'mz': mz, 'idx': i + len(native_names)}
+        
+        # Process each lipid with a progress bar
+        for lipid_name in tqdm(self.adata.uns['lipidome_names'], desc="Creating lipid plots"):
+            # Get data for this lipid
+            coords = self.adata.obs[["zccf", "yccf", "xccf", "SectionID", "division", "boundary"]].copy()
+            info = lipid_info[lipid_name]
+            lipid_idx = info['idx']
+            lipid_values = self.adata.obsm['X_lipidome'][:, lipid_idx].flatten()
+            df_lipid = pd.DataFrame({lipid_name: lipid_values}, index=coords.index)
+            data = pd.concat([coords, df_lipid], axis=1).reset_index(drop=True)
+
+            unique_sections = sorted(data["SectionID"].unique())
+            n_sections = len(unique_sections)
+            ncols = math.ceil(math.sqrt(n_sections * 4 / 3))
+            nrows = math.ceil(n_sections / ncols)
+
+            # Compute percentiles for color scaling
+            results = []
+            for sec in unique_sections:
+                subset = data[data["SectionID"] == sec]
+                perc2 = subset[lipid_name].quantile(0.02)
+                perc98 = subset[lipid_name].quantile(0.98)
+                results.append([sec, perc2, perc98])
+            percentile_df = pd.DataFrame(results, columns=["SectionID", "2-perc", "98-perc"])
+            med2p = percentile_df["2-perc"].median()
+            med98p = percentile_df["98-perc"].median()
+
+            global_min_z = data["zccf"].min()
+            global_max_z = data["zccf"].max()
+            global_min_y = -data["yccf"].max()
+            global_max_y = -data["yccf"].min()
+
+            fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
+            axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
+
+            for idx, sec in enumerate(unique_sections):
+                ax = axes[idx]
+                sec_data = data[data["SectionID"] == sec]
+                ax.scatter(
+                    sec_data["zccf"], -sec_data["yccf"],
+                    c=sec_data[lipid_name], cmap="plasma", s=0.5,
+                    alpha=0.8, rasterized=True, vmin=med2p, vmax=med98p
+                )
+                ax.set_aspect("equal")
+                ax.axis("off")
+                ax.set_xlim(global_min_z, global_max_z)
+                ax.set_ylim(global_min_y, global_max_y)
+                ax.set_title(f"SectionID {sec}", fontsize=10)
+                if "boundary" in sec_data.columns:
+                    contour_data = sec_data[sec_data["boundary"] == 1]
+                    ax.scatter(
+                        contour_data["zccf"], -contour_data["yccf"],
+                        c="black", s=0.25, alpha=0.5, rasterized=True
+                    )
+            for j in range(idx + 1, len(axes)):
+                fig.delaxes(axes[j])
+
+            # Add metadata as a text box in the figure
+            mz = info['mz']
+            feature_scores = ""
+            if 'feature_selection_scores' in self.adata.uns:
+                scores = self.adata.uns['feature_selection_scores']
+                if mz in scores.index:
+                    feature_scores = "\nFeature Selection Scores:\n"
+                    for col in scores.columns:
+                        feature_scores += f"{col}: {scores.loc[mz, col]:.3f}\n"
+            final_table_info = ""
+            if mz in final_table.index:
+                row = final_table.loc[mz]
+                final_table_info = "\nAnnotation Information:\n"
+                for col in ['Score', 'AnnotationLCMSPrioritized', 'BestAdduct']:
+                    if col in row:
+                        final_table_info += f"{col}: {row[col]}\n"
+            metadata_text = (
+                f"Lipid Name: {lipid_name}\n"
+                f"Source: {info['source']}\n"
+                f"m/z: {mz}\n"
+                f"{feature_scores}"
+                f"{final_table_info}"
+            )
+            # Place the text box in the upper right of the figure
+            fig.text(0.98, 0.98, metadata_text, ha='right', va='top', fontsize=10, family='monospace')
+
+            plt.tight_layout(rect=[0, 0, 0.8, 1])  # leave space for the text box
+            safe_name = lipid_name.replace(' ', '_').replace(':', '_')
+            pdf_path = os.path.join(output_dir, f"{safe_name}.pdf")
+            plt.savefig(pdf_path)
+            plt.close(fig)
+        
+        print(f"Created individual PDF plots in directory: {output_dir}")

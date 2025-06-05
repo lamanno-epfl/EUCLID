@@ -34,6 +34,20 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from adjustText import adjust_text
 from PyPDF2 import PdfMerger
+import os
+import math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
+from matplotlib.animation import FuncAnimation
+import cv2
+import glob
+import subprocess
+from threadpoolctl import threadpool_limits
+from scipy import sparse
+from tqdm import tqdm
 
 mpl.rcParams['pdf.fonttype'] = 42
 
@@ -260,8 +274,6 @@ class Plotting:
         if layout is None:
             ncols = math.ceil(math.sqrt(n_sections * 4 / 3))
             nrows = math.ceil(n_sections / ncols)
-        else:
-            nrows, ncols = layout
         fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
         axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
         for idx, sec in enumerate(unique_sections):
@@ -919,3 +931,818 @@ class Plotting:
             plt.show()
         else:
             plt.close()
+
+    def plot_lipids_rgb_grid(self, lipid_names, section_ids, group_size=3, output_file="lipid_rgb_grid.png"):
+        """
+        Plot N lipids in groups of 3 as RGB overlays for each section, in a grid.
+        Each row is a group of 3 lipids, each column is a section.
+        Uses z_index and y_index from adata.obs for spatial coordinates.
+
+        Parameters
+        ----------
+        lipid_names : list
+            List of lipid names (must be in adata.var_names).
+        section_ids : list
+            List of section IDs to plot (must match adata.obs['SectionID']).
+        group_size : int, optional
+            Number of lipids per group (default 3).
+        output_file : str, optional
+            Output filename (PNG, saved in plots directory).
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import random
+
+        # Prepare data
+        data = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs_names)
+        data = data.join(self.adata.obs[['SectionID', 'z_index', 'y_index']])
+        # Group lipids
+        lipid_groups = [lipid_names[i:i+group_size] for i in range(0, len(lipid_names), group_size)]
+        n_rows = len(lipid_groups)
+        n_cols = len(section_ids)
+        fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(4*n_cols, 2.5*n_rows))
+        if n_rows == 1:
+            axes = np.expand_dims(axes, 0)
+        if n_cols == 1:
+            axes = np.expand_dims(axes, 1)
+        plt.subplots_adjust(wspace=0, hspace=0.01)
+
+        # Helper for random color
+        def random_color():
+            return np.random.uniform(0.3, 1.0, size=3)
+
+        # Set global axis limits
+        x_min, x_max = data['z_index'].min(), data['z_index'].max()
+        y_min, y_max = data['y_index'].min(), data['y_index'].max()
+
+        # For reproducibility
+        np.random.seed(42)
+        global_channel_colors = [[random_color() for _ in range(group_size)] for _ in range(n_rows)]
+
+        # Plot
+        for col_i, sid in enumerate(section_ids):
+            sid_subset = data[data['SectionID'] == sid]
+            for row_i, lipid_set in enumerate(lipid_groups):
+                ax = axes[row_i, col_i]
+                ax.set_facecolor('black')
+                ax.set_xticks([])
+                ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                ax.set_aspect('equal')
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                # Get intensities
+                lipid_values = sid_subset[lipid_set].to_numpy()
+                # Find max channel for each point
+                max_indices = np.argmax(lipid_values, axis=1)
+                final_colors = np.zeros((lipid_values.shape[0], 3))
+                for i in range(group_size):
+                    mask = max_indices == i
+                    if np.sum(mask) > 0:
+                        # Normalize intensities for contrast
+                        norm_intensity = np.clip((lipid_values[mask, i] - 0.2) / (0.8 - 0.2), 0, 1)
+                        final_colors[mask] = norm_intensity[:, None] * global_channel_colors[row_i][i]
+                ax.scatter(sid_subset['z_index'], sid_subset['y_index'], c=final_colors, s=0.4, edgecolors='none', rasterized=True)
+                # Optionally, add lipid names as text
+                if col_i == 0:
+                    ax.set_ylabel(f"{', '.join(lipid_set)}", color='white', fontsize=8)
+        plt.savefig(os.path.join(PLOTS_DIR, output_file), dpi=300)
+        plt.close(fig)
+        print(f"Saved lipid RGB grid plot to {os.path.join(PLOTS_DIR, output_file)}")
+
+    def plot_lipizones_entire_dataset(self, section_col='SectionPlot', output_file="dataset_lipizones_entire.png"):
+        """
+        Visualize the entire dataset: all unique Samples and all unique sections, offset for clarity.
+        Each column is a Sample, each row is a section (SectionPlot or SectionID).
+        Colors by adata.obs['lipizone_color'].
+
+        Parameters
+        ----------
+        section_col : str, optional
+            Column in adata.obs to use for section (default 'SectionPlot').
+        output_file : str, optional
+            Output filename (PNG, saved in plots directory).
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+
+        all_data = self.adata.obs.copy()
+        if section_col not in all_data.columns:
+            raise ValueError(f"{section_col} not found in adata.obs columns.")
+        if 'Sample' not in all_data.columns:
+            raise ValueError("'Sample' not found in adata.obs columns.")
+        if 'lipizone_color' not in all_data.columns:
+            raise ValueError("'lipizone_color' not found in adata.obs columns.")
+        if 'x' not in all_data.columns or 'y' not in all_data.columns:
+            raise ValueError("'x' and 'y' must be present in adata.obs.")
+
+        sectionplots = sorted(all_data[section_col].unique())
+        samples = sorted(all_data['Sample'].unique())
+        fig, ax = plt.subplots(figsize=(24, 10))
+
+        # Spacing parameters
+        row_spacing = 50.0
+        row_overlap = 50.0
+        col_spacing = 450.0
+
+        for i, sp in enumerate(sectionplots):
+            data_sp = all_data[all_data[section_col] == sp]
+            for j, smp in enumerate(samples):
+                data_subset = data_sp[data_sp['Sample'] == smp]
+                if data_subset.empty:
+                    continue
+                row_offset_x = row_overlap * i
+                row_offset_y = row_spacing * i
+                col_offset_x = col_spacing * j
+                # Apply offsets
+                plot_x = data_subset['y'] + row_offset_x + col_offset_x
+                plot_y = -data_subset['x'] + row_offset_y
+                ax.scatter(
+                    plot_x,
+                    plot_y,
+                    c=data_subset['lipizone_color'],
+                    s=0.7,
+                    alpha=0.7,
+                    rasterized=True
+                )
+        ax.set_aspect('equal', 'datalim')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(PLOTS_DIR, output_file), dpi=300)
+        plt.close(fig)
+        print(f"Saved entire dataset lipizone plot to {os.path.join(PLOTS_DIR, output_file)}")
+
+    def create_lipids_movie(
+        pc_list=None,
+        interp_dir="3d_interpolated_native",
+        movie_dir="movie_autostrada",
+        final_movie_path="lipids_autostrada.mp4",
+        grid_cols=16,
+        grid_rows=10,
+    ):
+
+        # --------------------------------------------
+        # 1) Per‐Section Scatter Plots for Each Lipid
+        # --------------------------------------------
+        if pc_list is None:
+            pc_list = ["HexCer 42:2;O2"]
+
+        # Build a DataFrame from adata.obs
+        pixels = self.adata.obs.copy()
+
+        # Ensure that 'SectionID', 'x', and 'y' exist
+        for col in ("SectionID", "x", "y"):
+            if col not in pixels.columns:
+                raise KeyError(f"adata.obs must contain a '{col}' column.")
+
+        # For each lipid in pc_list, pull its values from adata.X into pixels
+        # Check that each PC_I is in adata.var_names
+        var_names = list(self.adata.var_names)
+        X_matrix = self.adata.X  # sparse or ndarray
+
+        for PC_I in pc_list:
+            if PC_I not in var_names:
+                raise ValueError(f"Lipid '{PC_I}' not found in adata.var_names.")
+            lipid_idx = var_names.index(PC_I)
+
+            # Extract the column from adata.X, whether sparse or dense
+            col_values = X_matrix[:, lipid_idx]
+            if sparse.issparse(col_values):
+                col_values = col_values.toarray().flatten()
+            else:
+                # If dense, ensure it's a 1D array
+                col_values = np.asarray(col_values).reshape(-1)
+
+            # Add the lipid column to pixels DataFrame
+            pixels[PC_I] = col_values
+
+        # Filter out rows where SectionID is missing
+        filtered_data = pixels.dropna(subset=["SectionID"]).copy()
+
+        # For each lipid (PC_I), generate the grid of scatter plots
+        for PC_I in pc_list:
+            results = []
+            currentPC = PC_I
+
+            # Compute 2nd and 98th percentile per SectionID
+            for section in filtered_data["SectionID"].unique():
+                subset = filtered_data[filtered_data["SectionID"] == section]
+                perc_2 = subset[currentPC].quantile(0.02)
+                perc_98 = subset[currentPC].quantile(0.98)
+                results.append([section, perc_2, perc_98])
+
+            percentile_df = pd.DataFrame(results, columns=["SectionID", "2-perc", "98-perc"])
+            med2p = percentile_df["2-perc"].median()
+            med98p = percentile_df["98-perc"].median()
+
+            # Unique non‐empty sections, sorted
+            unique_sections = sorted(filtered_data["SectionID"].unique())
+            n_sections = len(unique_sections)
+
+            # Compute grid dimensions aiming for ~16:9 aspect ratio
+            ncols = math.ceil(math.sqrt(n_sections * 16 / 9))
+            nrows = math.ceil(n_sections / ncols)
+
+            # Create figure and axes
+            fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2, nrows * 2))
+            axes = axes.flatten()
+
+            # Plot each section
+            for i, section in enumerate(unique_sections):
+                ddf = filtered_data[filtered_data["SectionID"] == section]
+                if ddf.empty:
+                    continue
+                ax = axes[i]
+                sc = ax.scatter(
+                    ddf["y"],
+                    -ddf["x"],
+                    c=ddf[currentPC],
+                    cmap="gray",
+                    s=0.5,
+                    rasterized=True,
+                    vmin=med2p,
+                    vmax=med98p,
+                )
+                ax.axis("off")
+                ax.set_aspect("equal")
+
+            # Turn off any unused axes
+            for j in range(i + 1, len(axes)):
+                axes[j].axis("off")
+
+            plt.tight_layout(rect=[0, 0, 0.9, 1])
+            plt.show()
+
+        # --------------------------------------------
+        # 2) Generate Individual 2D Slice Movies
+        # --------------------------------------------
+        # Ensure output directory exists
+        os.makedirs(movie_dir, exist_ok=True)
+
+        # Limit thread pools (optional, based on original code)
+        threadpool_limits(limits=8)
+        os.environ["OMP_NUM_THREADS"] = "6"
+
+        # Walk through files in interp_dir
+        for fname in tqdm(os.listdir(interp_dir), desc="Processing 3D .npy files"):
+            if fname == "old":
+                continue
+            if not fname.lower().endswith(".npy"):
+                continue
+
+            input_path = os.path.join(interp_dir, fname)
+            title = os.path.splitext(fname)[0].split("interpolation")[0].strip()
+
+            # Load the 3D array
+            sm = np.load(input_path)
+            # Discard first 20 z‐slices
+            sm = sm[20 :, :, :]
+            vmin = np.min(sm)
+            vmax = np.max(sm)
+
+            # Create a figure for the animation
+            fig, ax = plt.subplots(figsize=(8, 8), facecolor="black")
+            fig.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
+            ax.axis("off")
+            ax.set_facecolor("black")
+
+            # Initial frame
+            im = ax.imshow(
+                sm[0, :, :], cmap="gray", interpolation="none", vmin=vmin, vmax=vmax
+            )
+            width = sm.shape[2]
+            ax.text(
+                width / 2,
+                0.5,
+                title,
+                color="white",
+                fontsize=18,
+                fontweight="bold",
+                ha="center",
+                va="top",
+            )
+
+            # Update function for FuncAnimation
+            def update(frame_idx):
+                im.set_data(sm[frame_idx, :, :])
+                return [im]
+
+            # Build and save the animation
+            ani = FuncAnimation(fig, update, frames=sm.shape[0], interval=50, blit=True)
+            out_movie_name = f"movie_autostrada_{fname}.mp4"
+            out_movie_path = os.path.join(movie_dir, out_movie_name)
+            ani.save(
+                out_movie_path,
+                writer="ffmpeg",
+                fps=20,
+                savefig_kwargs={"facecolor": "black", "bbox_inches": "tight", "pad_inches": 0},
+            )
+
+            plt.close(fig)
+
+        # --------------------------------------------
+        # 3) Assemble the Final Grid Movie
+        # --------------------------------------------
+        # Directory containing the individual slice movies
+        input_dir = movie_dir
+        movie_files = sorted(glob.glob(os.path.join(input_dir, "*.mp4")))[: grid_cols * grid_rows]
+
+        if len(movie_files) < grid_cols * grid_rows:
+            print(
+                f"Warning: Only {len(movie_files)} movies available for a "
+                f"{grid_cols}x{grid_rows} grid ({grid_cols * grid_rows} needed)"
+            )
+        print(f"Processing {len(movie_files)} movie files for grid assembly...")
+
+        # Temporary directories for frames
+        temp_dir = os.path.join(movie_dir, "temp_frames")
+        grid_frames_dir = os.path.join(movie_dir, "grid_frames")
+        os.makedirs(temp_dir, exist_ok=True)
+        os.makedirs(grid_frames_dir, exist_ok=True)
+
+        # Extract dimensions and frame count from the first movie
+        sample_frame_path = os.path.join(temp_dir, "sample.png")
+        subprocess.call(
+            ["ffmpeg", "-i", movie_files[0], "-vframes", "1", sample_frame_path, "-y"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sample_frame = cv2.imread(sample_frame_path)
+        if sample_frame is None:
+            raise RuntimeError(f"Could not read sample frame from {movie_files[0]}")
+        height, width = sample_frame.shape[:2]
+
+        # Count frames using ffprobe
+        result = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_packets",
+                "-show_entries",
+                "stream=nb_read_packets",
+                "-of",
+                "csv=p=0",
+                movie_files[0],
+            ]
+        ).decode("utf-8").strip()
+        frame_count = int(result)
+        fps = 20  # consistent with earlier
+
+        print(f"Frame dimensions: {width}x{height}")
+        print(f"Frames per video: {frame_count}")
+
+        # Determine grid output size (scale down each tile to 25%)
+        scale_factor = 0.25
+        tile_w = int(width * scale_factor)
+        tile_h = int(height * scale_factor)
+        grid_width = tile_w * grid_cols
+        grid_height = tile_h * grid_rows
+
+        print(f"Final grid dimensions: {grid_width}x{grid_height}")
+
+        # Build every frame of the grid movie
+        for frame_idx in tqdm(range(frame_count), desc="Creating grid frames"):
+            # Create an empty (black) grid frame
+            grid_frame = np.zeros((grid_height, grid_width, 3), dtype=np.uint8)
+
+            # For each individual movie, extract its frame_idx‐th frame
+            for i, movie_path in enumerate(movie_files):
+                frame_png = os.path.join(temp_dir, f"video_{i}_frame_{frame_idx}.png")
+                subprocess.call(
+                    [
+                        "ffmpeg",
+                        "-i",
+                        movie_path,
+                        "-vf",
+                        f"select=eq(n\\,{frame_idx})",
+                        "-vframes",
+                        "1",
+                        frame_png,
+                        "-y",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+                if os.path.exists(frame_png) and os.path.getsize(frame_png) > 0:
+                    tile = cv2.imread(frame_png)
+                    if tile is not None:
+                        # Resize to tile size
+                        tile_resized = cv2.resize(tile, (tile_w, tile_h))
+                        row_idx = i // grid_cols
+                        col_idx = i % grid_cols
+                        y_start = row_idx * tile_h
+                        y_end = y_start + tile_h
+                        x_start = col_idx * tile_w
+                        x_end = x_start + tile_w
+
+                        # Place into grid
+                        try:
+                            grid_frame[y_start:y_end, x_start:x_end] = tile_resized
+                        except ValueError as e:
+                            print(f"Error placing tile {i} at frame {frame_idx}: {e}")
+                            print(
+                                f"Expected area: ({y_start}:{y_end}, {x_start}:{x_end}), "
+                                f"grid size: {grid_frame.shape}"
+                            )
+                            print(f"Tile size: {tile_resized.shape}")
+
+                    # Clean up
+                    os.remove(frame_png)
+
+            # Save the assembled grid frame
+            grid_frame_path = os.path.join(grid_frames_dir, f"grid_frame_{frame_idx:04d}.png")
+            cv2.imwrite(grid_frame_path, grid_frame)
+
+        # Encode the grid frames into the final movie
+        print("Encoding final grid movie with FFmpeg...")
+        subprocess.call(
+            [
+                "ffmpeg",
+                "-framerate",
+                str(fps),
+                "-i",
+                os.path.join(grid_frames_dir, "grid_frame_%04d.png"),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "23",
+                final_movie_path,
+            ]
+        )
+        print(f"Final grid movie saved to: {final_movie_path}")
+
+        # Cleanup temporary directories
+        print("Cleaning up temporary frames...")
+        # Remove grid frames
+        for f in os.listdir(grid_frames_dir):
+            os.remove(os.path.join(grid_frames_dir, f))
+        os.rmdir(grid_frames_dir)
+
+        # Remove temp frames
+        for f in os.listdir(temp_dir):
+            os.remove(os.path.join(temp_dir, f))
+        os.rmdir(temp_dir)
+
+        print("All done!")
+
+
+    def make_lipizone_rain_movie(self, section_id, output_prefix="scatter_rain_final", total_duration_ms=15000, point_size=2.0):
+        """
+        Create a movie of lipizones 'raining in' by color for a given SectionID.
+        Points appear grouped by their unique color, one color at a time.
+
+        Parameters
+        ----------
+        section_id : int or str
+            The SectionID to plot.
+        output_prefix : str, optional
+            Prefix for the output mp4 file (saved in plots directory).
+        total_duration_ms : int, optional
+            Total duration of the movie in milliseconds.
+        point_size : float, optional
+            Size of scatter points.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import matplotlib.animation as animation
+        import os
+
+        data = self.adata.obs.copy()
+        if 'SectionID' not in data.columns:
+            raise ValueError("'SectionID' not found in adata.obs columns.")
+        if 'zccf' not in data.columns or 'yccf' not in data.columns:
+            raise ValueError("'zccf' and 'yccf' must be present in adata.obs.")
+        if 'lipizone_color' not in data.columns:
+            raise ValueError("'lipizone_color' not found in adata.obs columns.")
+
+        ddf = data[data['SectionID'] == section_id]
+        if ddf.empty:
+            raise ValueError(f"No data found for SectionID {section_id}.")
+
+        x = ddf['zccf'].values
+        y = -ddf['yccf'].values
+        colors = ddf['lipizone_color'].values
+
+        unique_colors = list(dict.fromkeys(colors))
+        n_frames = len(unique_colors)
+        interval = total_duration_ms / n_frames
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.axis('off')
+        ax.set_xlim(x.min() - 1, x.max() + 1)
+        ax.set_ylim(y.min() - 1, y.max() + 1)
+
+        scatter = ax.scatter([], [], s=point_size, rasterized=True)
+
+        def init():
+            scatter.set_offsets(np.empty((0, 2)))
+            scatter.set_facecolors([])
+            return scatter,
+
+        def animate(frame):
+            allowed_colors = unique_colors[:frame + 1]
+            mask = np.isin(colors, allowed_colors)
+            current_x = x[mask]
+            current_y = y[mask]
+            current_colors = colors[mask]
+            offsets = np.column_stack((current_x, current_y))
+            scatter.set_offsets(offsets)
+            scatter.set_facecolors(current_colors)
+            return scatter,
+
+        ani = animation.FuncAnimation(
+            fig, animate, frames=n_frames, init_func=init,
+            interval=interval, blit=True
+        )
+        output_path = os.path.join(PLOTS_DIR, f"{output_prefix}_{section_id}.mp4")
+        ani.save(output_path, writer='ffmpeg', fps=30)
+        plt.close(fig)
+        print(f"Saved lipizone rain movie to {output_path}")
+
+    def make_splitter_movie(self, section_id, level_prefix='level_', n_levels=10, frames_per_level=5, output_file="level_transitions_animation.mp4", point_size=2.0):
+        """
+        Animate transitions between hierarchical levels for a given SectionID, fading between cluster colorings.
+
+        Parameters
+        ----------
+        section_id : int or str
+            The SectionID to animate.
+        level_prefix : str, optional
+            Prefix for hierarchical level columns (default 'level_').
+        n_levels : int, optional
+            Number of levels to animate (default 10).
+        frames_per_level : int, optional
+            Number of frames for each transition (default 5).
+        output_file : str, optional
+            Output filename (mp4, saved in plots directory).
+        point_size : float, optional
+            Size of scatter points.
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import matplotlib.animation as animation
+        from collections import Counter
+        from matplotlib import colors as mcolors
+        import os
+
+        data = self.adata.obs.copy()
+        if 'SectionID' not in data.columns:
+            raise ValueError("'SectionID' not found in adata.obs columns.")
+        if 'zccf' not in data.columns or 'yccf' not in data.columns:
+            raise ValueError("'zccf' and 'yccf' must be present in adata.obs.")
+        if 'lipizone_color' not in data.columns:
+            raise ValueError("'lipizone_color' not found in adata.obs columns.")
+        # Check for all required level columns
+        levels = [f"{level_prefix}{i}" for i in range(1, n_levels+1)]
+        for lvl in levels:
+            if lvl not in data.columns:
+                raise ValueError(f"{lvl} not found in adata.obs columns.")
+
+        section_data = data[data['SectionID'] == section_id]
+        if section_data.empty:
+            raise ValueError(f"No data found for SectionID {section_id}.")
+        x = section_data['zccf'].values
+        y = -section_data['yccf'].values
+
+        # Compute most frequent color for each cluster at each level
+        level_color_mappings = {}
+        for lvl in levels:
+            unique_values = section_data[lvl].unique()
+            value_color_map = {}
+            for value in unique_values:
+                value_data = section_data[section_data[lvl] == value]
+                if len(value_data) > 0:
+                    color_counts = Counter(value_data['lipizone_color'])
+                    most_common_color = color_counts.most_common(1)[0][0]
+                    value_color_map[value] = most_common_color
+            level_color_mappings[lvl] = value_color_map
+
+        n_frames_per_level = frames_per_level
+        total_frames = len(levels) * n_frames_per_level
+
+        def get_frame_colors(frame_idx):
+            level_idx = frame_idx // n_frames_per_level
+            transition_progress = (frame_idx % n_frames_per_level) / n_frames_per_level
+            current_level = levels[level_idx]
+            next_level = levels[min(level_idx + 1, len(levels) - 1)]
+            current_mapping = level_color_mappings[current_level]
+            # For the last level, just show it
+            if level_idx == len(levels) - 1:
+                colors = [current_mapping.get(val, 'gray') for val in section_data[current_level]]
+                return colors
+            next_mapping = level_color_mappings[next_level]
+            current_colors = [current_mapping.get(val, 'gray') for val in section_data[current_level]]
+            next_colors = [next_mapping.get(val, 'gray') for val in section_data[next_level]]
+            current_rgba = [mcolors.to_rgba(c) for c in current_colors]
+            next_rgba = [mcolors.to_rgba(c) for c in next_colors]
+            blended_colors = []
+            for i in range(len(current_rgba)):
+                c1 = np.array(current_rgba[i])
+                c2 = np.array(next_rgba[i])
+                blended = (1 - transition_progress) * c1 + transition_progress * c2
+                blended_colors.append(blended)
+            return blended_colors
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.axis('off')
+        ax.set_xlim(x.min() - 1, x.max() + 1)
+        ax.set_ylim(y.min() - 1, y.max() + 1)
+        scatter = ax.scatter([], [], s=point_size, rasterized=True)
+
+        def init():
+            scatter.set_offsets(np.empty((0, 2)))
+            scatter.set_facecolors([])
+            return scatter,
+
+        def animate(frame):
+            offsets = np.column_stack((x, y))
+            scatter.set_offsets(offsets)
+            colors = get_frame_colors(frame)
+            scatter.set_facecolors(colors)
+            return scatter,
+
+        ani = animation.FuncAnimation(
+            fig, animate, frames=total_frames, init_func=init,
+            interval=500, blit=True
+        )
+        output_path = os.path.join(PLOTS_DIR, output_file)
+        ani.save(output_path, writer='ffmpeg', fps=2)
+        plt.close(fig)
+        print(f"Saved splitter movie to {output_path}")
+
+    def create_marching_cubes_volumes(self, 
+                                     label_col='Lipizone_names', 
+                                     color_col='lipizone_color', 
+                                     x_col='x_index', y_col='y_index', z_col='z_index',
+                                     out_dir="3d_lipizone_renders",
+                                     grid_shape=(528, 320, 456),
+                                     structure_size=12,
+                                     keep_top_k=4,
+                                     symmetrize=True,
+                                     marching_level=0.5,
+                                     voxel_spacing=(1,1,1),
+                                     origin=(0,0,0),
+                                     gaussian_sigma=2.5,
+                                     mesh_smoothing_iterations=2,
+                                     mesh_smoothing_factor=0.2):
+        """
+        For each cluster in adata.obs[label_col], voxelize, clean, smooth, symmetrize, extract mesh with marching cubes, and save as .npz.
+        Parameters follow your original rationale, but are adapted to adata structure.
+        """
+        import numpy as np
+        import os
+        from scipy.ndimage import binary_closing, label, gaussian_filter
+        from scipy.ndimage import sum as ndi_sum
+        from skimage import measure
+        from collections import Counter
+        from tqdm import tqdm
+
+        # Prepare output dir
+        os.makedirs(out_dir, exist_ok=True)
+        obs = self.adata.obs
+        mask = np.isfinite(obs[[x_col, y_col, z_col]].values).all(axis=1)
+        pixels = obs.loc[mask].copy()
+        points = pixels[[x_col, y_col, z_col]].values
+        labels = pixels[label_col].values
+        colors_arr = pixels[color_col].values
+        unique_labels = np.unique(labels)
+        color_map = {lbl: colors_arr[labels == lbl][0] for lbl in unique_labels}
+
+        # --- Parameters
+        GRID_SHAPE = grid_shape
+        STRUCTURE_SIZE = structure_size
+        KEEP_TOP_K = keep_top_k
+        SYMMETRIZE = symmetrize
+        MARCHING_LEVEL = marching_level
+        VOXEL_SPACING = voxel_spacing
+        ORIGIN = origin
+        GAUSSIAN_SIGMA = gaussian_sigma
+
+        # --- Helpers
+        def voxelize_fixed(points, grid_shape=GRID_SHAPE):
+            idx = np.floor(points).astype(int)
+            vol = np.zeros(grid_shape, dtype=bool)
+            for i in range(idx.shape[0]):
+                x, y, z = idx[i]
+                if 0 <= x < grid_shape[0] and 0 <= y < grid_shape[1] and 0 <= z < grid_shape[2]:
+                    vol[x, y, z] = True
+            return vol
+
+        def clean_mask(mask, struct_size=STRUCTURE_SIZE, top_k=KEEP_TOP_K, symmetrize=SYMMETRIZE):
+            struct = np.ones((struct_size,)*3, dtype=bool)
+            closed = binary_closing(mask, structure=struct)
+            labeled, n_comp = label(closed)
+            if n_comp == 0:
+                return closed.astype(bool)
+            vols = ndi_sum(mask, labeled, index=np.arange(1, n_comp+1))
+            top_idxs = np.argsort(vols)[-top_k:]
+            new_mask = np.zeros_like(mask)
+            for ti in top_idxs:
+                new_mask |= (labeled == (ti+1))
+            if symmetrize:
+                new_mask = new_mask | np.flip(new_mask, axis=2)
+            return new_mask
+
+        def smooth_mask(mask, sigma=GAUSSIAN_SIGMA):
+            float_mask = mask.astype(float)
+            smoothed = gaussian_filter(float_mask, sigma=sigma)
+            return smoothed
+
+        def mesh_from_binary(mask, level=MARCHING_LEVEL, spacing=VOXEL_SPACING, origin=ORIGIN):
+            verts, faces, _, _ = measure.marching_cubes(mask, level=level, spacing=spacing)
+            verts = verts + np.array(origin)[None, :]
+            return verts, faces
+
+        # --- Main loop
+        for lbl in tqdm(unique_labels, desc="Rendering clusters"):
+            try:
+                pts = points[labels == lbl]
+                raw_mask = voxelize_fixed(pts)
+                clean_mask_ = clean_mask(raw_mask)
+                sm_fld = smooth_mask(clean_mask_)
+                sm_binary = sm_fld >= MARCHING_LEVEL
+                labeled, n_comp = label(sm_binary)
+                if n_comp:
+                    vols = ndi_sum(sm_binary, labeled, index=np.arange(1, n_comp+1))
+                    largest_vol = vols.max()
+                    threshold = largest_vol / 4
+                    labelz = np.arange(1, n_comp+1)
+                    selected_labelz = labelz[vols >= threshold]
+                    sm_binary = np.isin(labeled, selected_labelz)
+                if SYMMETRIZE:
+                    sm_binary = sm_binary | np.flip(sm_binary, axis=2)
+                sm_fld = sm_fld * sm_binary.astype(float)
+                verts3, faces3 = mesh_from_binary(sm_fld)
+                fname = str(lbl).replace("/", "_").replace(" ", "_") + "_mesh.npz"
+                np.savez_compressed(os.path.join(out_dir, fname), verts=verts3, faces=faces3)
+            except Exception as e:
+                print(f"Failed for {lbl}: {e}")
+                continue
+        print(f"Saved all meshes to {out_dir}")
+
+    def plot_marching_cubes_plotly(self, out_dir="3d_lipizone_renders", labels_to_plot=None, color_col='lipizone_color', opacity_mesh=0.8, html_file="lipizone_3d.html", volume_trace=None):
+        """
+        Load saved marching cubes meshes from out_dir and overlay them in a Plotly 3D scene, coloring by cluster, and export as HTML.
+        Optionally add a background anatomical volume (volume_trace).
+        """
+        import numpy as np
+        import os
+        import plotly.graph_objects as go
+        from tqdm import tqdm
+
+        obs = self.adata.obs
+        mask = np.isfinite(obs[['x_index', 'y_index', 'z_index']].values).all(axis=1)
+        pixels_clean = obs.loc[mask].copy()
+        labels = pixels_clean['Lipizone_names'].values
+        colors_arr = pixels_clean[color_col].values
+        unique_labels = np.unique(labels)
+        color_map = {lbl: colors_arr[labels == lbl][0] for lbl in unique_labels}
+
+        if labels_to_plot is None:
+            labels_to_plot = unique_labels
+
+        def load_mesh(label):
+            fn = os.path.join(out_dir, f"{str(label).replace('/', '_')}_mesh.npz")
+            data = np.load(fn)
+            return data['verts'], data['faces']
+
+        fig = go.Figure()
+        if volume_trace is not None:
+            fig.add_trace(volume_trace)
+        for lbl in labels_to_plot:
+            try:
+                verts, faces = load_mesh(lbl)
+                x, y, z = verts.T
+                i, j, k = faces.T
+                fig.add_trace(go.Mesh3d(
+                    x=x, y=y, z=z,
+                    i=i, j=j, k=k,
+                    color=color_map.get(lbl, "gray"),
+                    opacity=opacity_mesh,
+                    name=str(lbl)
+                ))
+            except Exception as e:
+                print(f"Failed to plot {lbl}: {e}")
+                continue
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            scene=dict(
+                xaxis=dict(showgrid=False, zeroline=False, visible=False),
+                yaxis=dict(showgrid=False, zeroline=False, visible=False),
+                zaxis=dict(showgrid=False, zeroline=False, visible=False),
+                aspectmode="data"
+            )
+        )
+        fig.write_html(html_file)
+        print(f"Saved 3D plot to {html_file}")
