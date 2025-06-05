@@ -357,6 +357,7 @@ class Preprocessing:
             Combined annotation table with possible matches.
         """
         from rdkit import Chem
+        import matplotlib.pyplot as plt
 
         msipeaks = self.adata.var_names.tolist()
         peaks_df = pd.DataFrame(msipeaks, columns = ["PATH_MZ"], index = msipeaks)
@@ -403,63 +404,85 @@ class Preprocessing:
         reference_mz = 800 # scale of our dataset
         distance_ab5ppm = ppm / 1e6 * reference_mz
         
-        def _find_closest_abbreviation(mz_list, lipidmaps):
+        def _find_closest_abbreviation_and_ppm(mz_list, lipidmaps):
             closest_abbreviations = []
+            closest_ppms = []
             for mz in mz_list:
                 abs_diffs = np.abs(lipidmaps['EXACT_MASS'].astype(float) - float(mz))
                 if np.min(abs_diffs) <= distance_ab5ppm:
                     closest_idx = abs_diffs.idxmin()
                     closest_abbreviation = lipidmaps.at[closest_idx, 'ABBREVIATION']
+                    db_mz = lipidmaps.at[closest_idx, 'EXACT_MASS']
+                    ppm_val = 1e6 * abs(float(mz) - float(db_mz)) / float(db_mz)
                 else:
                     closest_abbreviation = None
+                    ppm_val = np.nan
                 closest_abbreviations.append(closest_abbreviation)
-            return closest_abbreviations
+                closest_ppms.append(ppm_val)
+            return closest_abbreviations, closest_ppms
 
         # add LIPIDMAPS annotation
         lipidmaps.loc[lipidmaps['ABBREVIATION'].isna(), 'ABBREVIATION'] = lipidmaps['NAME']
-        lipidmaps = lipidmaps[['EXACT_MASS',	'ABBREVIATION']]
+        lipidmaps = lipidmaps[['EXACT_MASS', 'ABBREVIATION']]
         # reconsider all possible adducts
         peaks_df['mz'] = peaks_df.index.astype(float)
         peaks_df['mz'] = [[peaks_df.iloc[i,:]['mz'] - 22.989769, peaks_df.iloc[i,:]['mz'] - 38.963707, peaks_df.iloc[i,:]['mz'] - 1.007825, peaks_df.iloc[i,:]['mz'] - 18.033823] for i in range(0, peaks_df.shape[0])]
         lipidmaps['EXACT_MASS'] = pd.to_numeric(lipidmaps['EXACT_MASS'], errors='coerce')
-        peaks_df['LIPIDMAPS'] = _find_closest_abbreviation(peaks_df['PATH_MZ'].values.tolist(), lipidmaps)
+        # For ppm, use the original m/z (not adducts)
+        lipidmaps_ppm = lipidmaps.copy()
+        peaks_df['LIPIDMAPS'], peaks_df['ppm_LIPIDMAPS'] = _find_closest_abbreviation_and_ppm(peaks_df['PATH_MZ'].values.tolist(), lipidmaps_ppm)
 
+        # User annotation
+        user_ppms = [np.nan] * len(peaks_df)
         try:
-            # Load user annotation CSV containing m/z and Lipid names
-            # We assume columns: ["m/z", "Lipids", "Score"]
             user_df = pd.read_csv(user_annotation_csv)
-    
-            # Example matching function:
-            def _find_matching_lipids(path_mz, lipid_mz_df):
+            def _find_matching_lipids_and_ppm(path_mz, lipid_mz_df):
                 try:
                     lower_bound = path_mz - ppm / 1e6 * path_mz
                     upper_bound = path_mz + ppm / 1e6 * path_mz
-                    matching_lipids = lipid_mz_df[(lipid_mz_df['m/z'] >= lower_bound) & (lipid_mz_df['m/z'] <= upper_bound)]['Lipids']
-                    # Split each lipid string at semicolons but preserve ";O2"
+                    matches = lipid_mz_df[(lipid_mz_df['m/z'] >= lower_bound) & (lipid_mz_df['m/z'] <= upper_bound)]
+                    matching_lipids = matches['Lipids']
+                    matching_mzs = matches['m/z']
                     lipid_list = []
-                    for lipid_str in matching_lipids:
+                    ppm_list = []
+                    for lipid_str, db_mz in zip(matching_lipids, matching_mzs):
                         if isinstance(lipid_str, str):
-                            # First replace ";O2" with a temporary marker
                             temp_str = lipid_str.replace(";O2", "___O2___")
-                            # Then split by semicolon
                             parts = [p.strip() for p in temp_str.split(';')]
-                            # Restore ";O2" in each part
                             parts = [p.replace("___O2___", ";O2") for p in parts]
                             lipid_list.extend(parts)
-                    return lipid_list if lipid_list else None
+                            # For each part, calculate ppm
+                            for _ in parts:
+                                ppm_val = 1e6 * abs(path_mz - db_mz) / db_mz
+                                ppm_list.append(ppm_val)
+                    return (lipid_list if lipid_list else None, ppm_list if ppm_list else [np.nan])
                 except:
-                    return None
-    
-            peaks_df['Lipid'] = [_find_matching_lipids(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
+                    return (None, [np.nan])
+            user_results = [_find_matching_lipids_and_ppm(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
+            peaks_df['Lipid'] = [r[0] for r in user_results]
+            user_ppms = [r[1][0] if r[1] else np.nan for r in user_results]
             user_df.index = user_df['m/z'].astype(str)
             peaks_df.index = peaks_df.index.astype(str) 
-                
         except:
             print("No paired LC-MS or METASPACE annotation dataset provided. Are you sure you want to continue with database search only?")
-            
+        peaks_df['ppm_USER'] = user_ppms
         peaks_df['Score'] = 0
-        common_indices = peaks_df.index.intersection(user_df.index)
-        peaks_df.loc[common_indices, 'Score'] = user_df.loc[common_indices, 'Score']
+        try:
+            common_indices = peaks_df.index.intersection(user_df.index)
+            peaks_df.loc[common_indices, 'Score'] = user_df.loc[common_indices, 'Score']
+        except:
+            pass
+
+        # Plot histogram of all ppm values (LIPIDMAPS and USER if available)
+        all_ppms = pd.Series(peaks_df['ppm_USER'], name='ppm_USER')
+        all_ppms = all_ppms.melt(value_name='ppm')['ppm'].dropna()
+        plt.figure(figsize=(7,4))
+        plt.hist(all_ppms, bins=50, color='dodgerblue', alpha=0.7)
+        plt.xlabel('ppm error')
+        plt.ylabel('Count')
+        plt.title('Distribution of ppm errors (LIPIDMAPS and USER)')
+        plt.tight_layout()
+        plt.show()
 
         return peaks_df
 
@@ -637,7 +660,7 @@ class Preprocessing:
 
     def save_msi_dataset(
         self,
-        filename="prep_msi_dataset.h5ad"
+        filename="msi_dataset_preprocessing_ops.h5ad"
     ):
         """
         Save the current AnnData object to disk.

@@ -110,6 +110,54 @@ class Plotting:
         else:
             plt.close()
 
+    def plot_chainlength_insaturation_hist(self, lipid_props_df: pd.DataFrame, show_inline: bool = True) -> None:
+        """
+        Plot a nested histogram of chain length and insaturations from a lipid properties DataFrame.
+
+        Parameters
+        ----------
+        lipid_props_df : pd.DataFrame
+            DataFrame containing at least 'carbons' and 'insaturations' columns.
+        show_inline : bool, optional
+            If True, display the plot inline.
+        """
+        df = lipid_props_df.copy()
+        cmap = plt.cm.Reds
+        vmin = df['insaturations'].min()
+        vmax = df['insaturations'].max()
+        bins = np.linspace(df['carbons'].min(), df['carbons'].max(), 20)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        df['carbon_bins'] = pd.cut(df['carbons'], bins, right=False)
+        grouped = df.groupby(['carbon_bins', 'insaturations']).size().unstack(fill_value=0)
+        grouped_normalized = grouped  # Optionally normalize if needed
+        plt.figure(figsize=(10, 6))
+        bottoms = np.zeros(len(bin_centers))
+        for insaturation in grouped_normalized.columns:
+            color = cmap((insaturation - vmin) / (vmax - vmin))
+            plt.bar(
+                bin_centers,
+                grouped_normalized[insaturation],
+                width=np.diff(bins),
+                bottom=bottoms,
+                color=color,
+                label=f"Insaturation {insaturation:.1f}",
+                edgecolor="none",
+            )
+            bottoms += grouped_normalized[insaturation]
+        plt.title('Total Chain Length')
+        for spine in ['top', 'right', 'left', 'bottom']:
+            plt.gca().spines[spine].set_visible(False)
+        plt.tick_params(axis='x', which='both', bottom=False, top=False)
+        plt.tick_params(axis='y', which='both', left=False, right=False)
+        plt.tight_layout()
+        plt.legend(title='Insaturations')
+        save_path = os.path.join(PLOTS_DIR, "chainlength_insat_LCMS.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
     #def plot_moran_by_class(self, annowmoran: pd.DataFrame, show_inline: bool = True) -> None:
  
 
@@ -258,7 +306,7 @@ class Plotting:
         """
         Plot spatial embeddings from adata.obsm[key], coloring by the chosen embedding‐column index.
 
-        For each section (as found in adata.obs["Section"]), compute that section’s
+        For each section (as found in adata.obs["Section"]), compute that section's
         2nd and 98th percentile of embedding‐column `currentProgram`. Then take the
         median across all sections to fix vmin/vmax. Plot each section in its own subplot.
 
@@ -305,7 +353,7 @@ class Plotting:
                 "Please increase nrows/ncols so that nrows*ncols ≥ number_of_sections."
             )
         
-        # 3) Compute 2nd/98th percentile for each section’s embedding‐column
+        # 3) Compute 2nd/98th percentile for each section's embedding‐column
         results = []
         for sec in sections:
             mask = (data["Section"] == sec).to_numpy()
@@ -808,3 +856,66 @@ class Plotting:
     def make_movie(self):
         """Placeholder for making a movie from the data."""
         print("make_movie not implemented yet.")
+
+    def plot_global_lipidomic_similarity(self, show_inline: bool = True) -> None:
+        """
+        Plot global lipidomic similarity patterns by subclass, coloring each pixel by subclass similarity.
+        Subclasses are sorted by similarity, assigned a rainbow colormap, and plotted as in plot_lipizones.
+        """
+        import numpy as np
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+        # 1. Average adata.X by subclass
+        if 'subclass' not in self.adata.obs.columns:
+            raise ValueError("'subclass' column not found in adata.obs")
+        df = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs.index)
+        df['subclass'] = self.adata.obs['subclass'].values
+        normalized_df = df.groupby('subclass').mean()
+        # 2. Sort subclasses by similarity (cumulative distance along the mean vectors)
+        X = normalized_df.values
+        diffs = np.linalg.norm(X[1:] - X[:-1], axis=1)
+        cumdist = np.concatenate([[0.0], np.cumsum(diffs)])
+        t = (cumdist - cumdist.min()) / (cumdist.max() - cumdist.min())
+        # 3. Assign rainbow colormap
+        cmap = cm.get_cmap('rainbow')
+        rgba_colors = cmap(t)
+        hex_colors = [mcolors.to_hex(c) for c in rgba_colors]
+        color_dict = dict(zip(normalized_df.index, hex_colors))
+        # 4. Assign color to each pixel by subclass
+        subclass_colors = self.adata.obs['subclass'].map(color_dict)
+        # 5. Prepare DataFrame for plotting (like plot_lipizones)
+        coords = self.adata.obs[['zccf', 'yccf', 'xccf', 'Section']].copy()
+        coords['subclass'] = self.adata.obs['subclass']
+        coords['plot_color'] = subclass_colors.values
+        unique_sections = sorted(coords['Section'].unique())
+        n_sections = len(unique_sections)
+        if n_sections == 0:
+            print("No sections to plot.")
+            return
+        global_min_z = coords['zccf'].min()
+        global_max_z = coords['zccf'].max()
+        global_min_y = -coords['yccf'].max()
+        global_max_y = -coords['yccf'].min()
+        ncols = int(np.ceil(np.sqrt(n_sections * 4 / 3)))
+        nrows = int(np.ceil(n_sections / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
+        axes = axes.flatten()
+        for idx, sec in enumerate(unique_sections):
+            ax = axes[idx]
+            sec_data = coords[coords['Section'] == sec]
+            ax.scatter(sec_data['zccf'], -sec_data['yccf'],
+                       c=sec_data['plot_color'], s=0.5, alpha=0.8, rasterized=True)
+            ax.axis('off')
+            ax.set_aspect('equal')
+            ax.set_xlim(global_min_z, global_max_z)
+            ax.set_ylim(global_min_y, global_max_y)
+            ax.set_title(f"Section {sec}", fontsize=10)
+        for j in range(idx+1, len(axes)):
+            fig.delaxes(axes[j])
+        plt.tight_layout()
+        save_path = os.path.join(PLOTS_DIR, "global_lipidomic_similarity.pdf")
+        plt.savefig(save_path)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
