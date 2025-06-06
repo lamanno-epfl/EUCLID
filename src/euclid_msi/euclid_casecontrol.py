@@ -32,6 +32,11 @@ import os
 import scanpy as sc
 from jax.nn import sigmoid
 from scipy.special import expit
+from scipy.spatial.distance import pdist
+from scipy.cluster import hierarchy as sch
+from matplotlib.colors import ListedColormap, to_rgba
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import networkx as nx
 
 CASECONTROL_DIR = Path(os.getcwd()) / "casecontrol_analysis"
 CASECONTROL_DIR.mkdir(exist_ok=True)
@@ -1163,252 +1168,868 @@ def main(sub_alldata, coords, config):
     return results
 
 # --- New API function ---
-def run_case_control_analysis(
-    adata: sc.AnnData,
-    lipids_to_analyze,
-    learning_rate=0.05,
-    num_epochs=2000,
-    adaptive_lr=False,
-    supertype_prior_std=1.0,
-    supertype_susceptibility_prior_std=1.0,
-    sample_prior_std=1.0,
-    section_prior_std=5.0,
-    downsampling=1,
-    random_seed=42,
-    normalize_percentiles=(0.1, 99.9),
-    guide_supertype_unconst_scale=0.1,
-    guide_supertype_susceptibility_scale=0.1,
-    x_col="x",
-    y_col="y",
-    sectionid_col="SectionID",
-    sample_col="Sample",
-    condition_col="Condition",
-    supertype_col="supertype",
-    verbose=True
-):
+class CaseControlAnalysis:
     """
-    Run case-control analysis on an AnnData object and save all outputs to 'casecontrol_analysis'.
+    A class for case-control analysis on spatial lipidomics data.
     """
-    import pandas as pd
-    # Extract obs and relevant columns
-    obs = adata.obs.copy()
-    # Extract lipid intensities (assume adata.var_names matches columns in adata.X)
-    lipid_df = pd.DataFrame(adata.X, columns=adata.var_names, index=adata.obs_names)
-    # Merge obs and lipid intensities
-    df = pd.concat([obs, lipid_df], axis=1)
-    # Check required columns
-    for col in [x_col, y_col, sectionid_col, sample_col, condition_col, supertype_col]:
-        if col not in df.columns:
-            raise ValueError(f"Required column '{col}' not found in AnnData.obs.")
-    # Prepare coords DataFrame for spatial splitting
-    coords = df[[x_col, y_col, sectionid_col]].copy()
-    coords.columns = ["x", "y", "SectionID"]
-    # Prepare config object
-    class Config:
-        pass
-    config = Config()
-    config.lipids_to_analyze = lipids_to_analyze
-    config.learning_rate = learning_rate
-    config.num_epochs = num_epochs
-    config.adaptive_lr = adaptive_lr
-    config.supertype_prior_std = supertype_prior_std
-    config.supertype_susceptibility_prior_std = supertype_susceptibility_prior_std
-    config.sample_prior_std = sample_prior_std
-    config.section_prior_std = section_prior_std
-    config.downsampling = downsampling
-    config.random_seed = random_seed
-    config.normalize_percentiles = normalize_percentiles
-    config.guide_supertype_unconst_scale = guide_supertype_unconst_scale
-    config.guide_supertype_susceptibility_scale = guide_supertype_susceptibility_scale
-    # Patch global config reference if needed
-    global CASECONTROL_DIR
-    global PDF_DIR
-    PDF_DIR = CASECONTROL_DIR
-    # Run main analysis
-    results = main(df, coords, config)
-    if verbose:
-        print(f"All outputs saved to: {CASECONTROL_DIR}")
-    return results
+    
+    def __init__(self, adata: sc.AnnData):
+        """
+        Initialize with an AnnData object containing spatial lipidomics data.
+        
+        Parameters
+        ----------
+        adata : sc.AnnData
+            AnnData object with spatial lipidomics data
+        """
+        self.adata = adata
+    
+    def run_case_control_analysis(
+        self,
+        lipids_to_analyze,
+        learning_rate=0.05,
+        num_epochs=2000,
+        adaptive_lr=False,
+        supertype_prior_std=1.0,
+        supertype_susceptibility_prior_std=1.0,
+        sample_prior_std=1.0,
+        section_prior_std=5.0,
+        downsampling=1,
+        random_seed=42,
+        normalize_percentiles=(0.1, 99.9),
+        guide_supertype_unconst_scale=0.1,
+        guide_supertype_susceptibility_scale=0.1,
+        x_col="x",
+        y_col="y",
+        sectionid_col="SectionID",
+        sample_col="Sample",
+        condition_col="Condition",
+        supertype_col="supertype",
+        verbose=True
+    ):
+        """
+        Run case-control analysis on an AnnData object and save all outputs to 'casecontrol_analysis'.
+        """
+        import pandas as pd
+        # Extract obs and relevant columns
+        obs = self.adata.obs.copy()
+        # Extract lipid intensities (assume adata.var_names matches columns in adata.X)
+        lipid_df = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs_names)
+        # Merge obs and lipid intensities
+        df = pd.concat([obs, lipid_df], axis=1)
+        # Check required columns
+        for col in [x_col, y_col, sectionid_col, sample_col, condition_col, supertype_col]:
+            if col not in df.columns:
+                raise ValueError(f"Required column '{col}' not found in AnnData.obs.")
+        # Prepare coords DataFrame for spatial splitting
+        coords = df[[x_col, y_col, sectionid_col]].copy()
+        coords.columns = ["x", "y", "SectionID"]
+        # Prepare config object
+        class Config:
+            pass
+        config = Config()
+        config.lipids_to_analyze = lipids_to_analyze
+        config.learning_rate = learning_rate
+        config.num_epochs = num_epochs
+        config.adaptive_lr = adaptive_lr
+        config.supertype_prior_std = supertype_prior_std
+        config.supertype_susceptibility_prior_std = supertype_susceptibility_prior_std
+        config.sample_prior_std = sample_prior_std
+        config.section_prior_std = section_prior_std
+        config.downsampling = downsampling
+        config.random_seed = random_seed
+        config.normalize_percentiles = normalize_percentiles
+        config.guide_supertype_unconst_scale = guide_supertype_unconst_scale
+        config.guide_supertype_susceptibility_scale = guide_supertype_susceptibility_scale
+        # Patch global config reference if needed
+        global CASECONTROL_DIR
+        global PDF_DIR
+        PDF_DIR = CASECONTROL_DIR
+        # Run main analysis
+        results = main(df, coords, config)
+        if verbose:
+            print(f"All outputs saved to: {CASECONTROL_DIR}")
+        return results
 
-def summarize_case_control_results(
-    adata,
-    lipids_to_analyze,
-    supertypes=None,
-    model_dir=None,
-    normalize_percentiles=(0.1, 99.9),
-    output_prefix="pregnancy"
-):
-    """
-    Summarize case-control model results for a set of lipids and supertypes.
-    Saves shift, baseline, and foldchange as parquet files in the casecontrol_analysis directory.
-    """
-    import numpy as np
-    import pandas as pd
-    from pathlib import Path
+    def summarize_case_control_results(
+        self,
+        lipids_to_analyze,
+        supertypes=None,
+        model_dir=None,
+        normalize_percentiles=(0.1, 99.9),
+        output_prefix="pregnancy"
+    ):
+        """
+        Summarize case-control model results for a set of lipids and supertypes.
+        Saves shift, baseline, and foldchange as parquet files in the casecontrol_analysis directory.
+        """
+        import numpy as np
+        import pandas as pd
+        from pathlib import Path
 
-    if supertypes is None:
-        supertypes = np.sort(adata.obs['supertype'].unique())
-    if model_dir is None:
-        model_dir = CASECONTROL_DIR
-    else:
-        model_dir = Path(model_dir)
-    aaaa_list, bbbb_list, lipid_names = [], [], []
+        if supertypes is None:
+            supertypes = np.sort(self.adata.obs['supertype'].unique())
+        if model_dir is None:
+            model_dir = CASECONTROL_DIR
+        else:
+            model_dir = Path(model_dir)
+        aaaa_list, bbbb_list, lipid_names = [], [], []
 
-    for lipid in tqdm(lipids_to_analyze):
-        param_path = model_dir / f"{lipid}_model_params.npy"
-        if not param_path.exists():
-            print(f"Warning: {param_path} not found, skipping.")
-            continue
-        params = np.load(param_path, allow_pickle=True).item()
-        # Baseline: sigmoid of unconst
-        baseline = pd.DataFrame(
-            sigmoid(params['alpha_supertype_unconst_loc']),
-            index=supertypes, columns=[lipid]
+        for lipid in tqdm(lipids_to_analyze):
+            param_path = model_dir / f"{lipid}_model_params.npy"
+            if not param_path.exists():
+                print(f"Warning: {param_path} not found, skipping.")
+                continue
+            params = np.load(param_path, allow_pickle=True).item()
+            # Baseline: sigmoid of unconst
+            baseline = pd.DataFrame(
+                sigmoid(params['alpha_supertype_unconst_loc']),
+                index=supertypes, columns=[lipid]
+            )
+            # Shift: susceptibility
+            shift = pd.DataFrame(
+                params['alpha_supertype_susceptibility_loc'],
+                index=supertypes, columns=[lipid]
+            )
+            aaaa_list.append(shift)
+            bbbb_list.append(baseline)
+            lipid_names.append(lipid)
+
+        # Concatenate across lipids
+        shift_df = pd.concat(aaaa_list, axis=1)
+        baseline_df = pd.concat(bbbb_list, axis=1)
+        shift_df.columns = lipid_names
+        baseline_df.columns = lipid_names
+
+        # Compute fold change
+        foldchange_df = shift_df / baseline_df
+
+        # Save results
+        shift_df.to_parquet(model_dir / f"shift_{output_prefix}.parquet")
+        baseline_df.to_parquet(model_dir / f"baseline_{output_prefix}.parquet")
+        foldchange_df.to_parquet(model_dir / f"foldchange_{output_prefix}.parquet")
+
+        print(f"Saved shift, baseline, and foldchange to {model_dir}")
+        return shift_df, baseline_df, foldchange_df
+
+    def summarize_xsupertypes(
+        self,
+        lipids_to_analyze,
+        supertypes=None,
+        model_dir=None,
+        output_prefix="pregnancy",
+        baseline_condition="naive",
+        upreg_threshold=0.2,
+        prob_threshold=0.98,
+        n_samples=1000
+    ):
+        """
+        For each lipid, compute upregulated, downregulated, and expressed supertypes using model parameter files.
+        Returns four DataFrames: upreg, downreg, expressed, and their union (all supertypes with any shift),
+        as well as lists: mean_score, ci_lowers, ci_uppers for the fraction of expressed supertypes that are also shifted (with 95% bootstrap CI).
+        Saves all as parquet files in the casecontrol_analysis directory.
+        """
+        import numpy as np
+        import pandas as pd
+        from tqdm import tqdm
+        from pathlib import Path
+        from scipy.special import expit
+
+        if supertypes is None:
+            supertypes = np.sort(self.adata.obs['supertype'].unique())
+        if model_dir is None:
+            model_dir = CASECONTROL_DIR
+        else:
+            model_dir = Path(model_dir)
+
+        lipid_upreg_xsupertypes = []
+        lipid_downreg_xsupertypes = []
+        lipid_expressed_xsupertypes = []
+        lipid_names = []
+
+        for lipid in tqdm(lipids_to_analyze):
+            param_path = model_dir / f"{lipid}_model_params.npy"
+            if not param_path.exists():
+                print(f"Warning: {param_path} not found, skipping.")
+                continue
+            params = np.load(param_path, allow_pickle=True).item()
+            loc_susc = params['alpha_supertype_susceptibility_loc']
+            scale_susc = params['alpha_supertype_susceptibility_scale']
+            loc_unconst = params['alpha_supertype_unconst_loc']
+            scale_unconst = params['alpha_supertype_unconst_scale']
+
+            # Draw samples for shift and baseline
+            samples_shift = np.random.default_rng(1234).normal(
+                loc=loc_susc[None, :],
+                scale=scale_susc[None, :],
+                size=(n_samples, loc_susc.shape[0])
+            )
+            samples_unconst = np.random.default_rng(1234).normal(
+                loc=loc_unconst[None, :],
+                scale=scale_unconst[None, :],
+                size=(n_samples, loc_unconst.shape[0])
+            )
+            samples_baseline = expit(samples_unconst)
+
+            # Upregulation: shift > threshold * baseline
+            upregulation = samples_shift > (upreg_threshold * samples_baseline)
+            downregulation = -samples_shift > (upreg_threshold * samples_baseline)
+            expressed = samples_baseline > 0.05
+
+            lipid_upreg_xsupertypes.append((np.mean(upregulation, axis=0) > prob_threshold).astype(float))
+            lipid_downreg_xsupertypes.append((np.mean(downregulation, axis=0) > prob_threshold).astype(float))
+            lipid_expressed_xsupertypes.append((np.mean(expressed, axis=0) > prob_threshold).astype(float))
+            lipid_names.append(lipid)
+
+        stindex = supertypes
+        lipid_upreg_xsupertypes_df = pd.DataFrame(lipid_upreg_xsupertypes, columns=stindex, index=lipid_names)
+        lipid_downreg_xsupertypes_df = pd.DataFrame(lipid_downreg_xsupertypes, columns=stindex, index=lipid_names)
+        lipid_expressed_xsupertypes_df = pd.DataFrame(lipid_expressed_xsupertypes, columns=stindex, index=lipid_names)
+        shifted_xsupertypes_df = lipid_upreg_xsupertypes_df | lipid_downreg_xsupertypes_df
+
+        # Save results
+        lipid_upreg_xsupertypes_df.to_parquet(model_dir / f"upreg_xsupertypes_{output_prefix}.parquet")
+        lipid_downreg_xsupertypes_df.to_parquet(model_dir / f"downreg_xsupertypes_{output_prefix}.parquet")
+        lipid_expressed_xsupertypes_df.to_parquet(model_dir / f"expressed_xsupertypes_{output_prefix}.parquet")
+        shifted_xsupertypes_df.to_parquet(model_dir / f"shifted_xsupertypes_{output_prefix}.parquet")
+
+        print(f"Saved upreg, downreg, expressed, and shifted xsupertypes to {model_dir}")
+
+        # --- Downstream: Bootstrap mean and CI for fraction of expressed supertypes that are also shifted ---
+        mean_score = []
+        ci_lowers = []
+        ci_uppers = []
+        for yyy in tqdm(range(lipid_expressed_xsupertypes_df.shape[0])):
+            exp = lipid_expressed_xsupertypes_df.iloc[yyy, :].values
+            shif = shifted_xsupertypes_df.iloc[yyy, :].values
+            n, B = len(exp), 10000
+            rng = np.random.default_rng(42)
+            # Bootstrap replicates
+            scores = [
+                (exp[idx] & shif[idx]).sum() / exp[idx].sum() if exp[idx].sum() > 0 else 0.0
+                for idx in rng.integers(0, n, size=(B, n))
+            ]
+            # Point estimate and 95% CI
+            mean_score.append(np.mean(scores))
+            ci_lower, ci_upper = np.percentile(scores, [2.5, 97.5])
+            ci_lowers.append(ci_lower)
+            ci_uppers.append(ci_upper)
+
+        return (
+            lipid_upreg_xsupertypes_df,
+            lipid_downreg_xsupertypes_df,
+            lipid_expressed_xsupertypes_df,
+            shifted_xsupertypes_df,
+            mean_score,
+            ci_lowers,
+            ci_uppers
         )
-        # Shift: susceptibility
-        shift = pd.DataFrame(
-            params['alpha_supertype_susceptibility_loc'],
-            index=supertypes, columns=[lipid]
-        )
-        aaaa_list.append(shift)
-        bbbb_list.append(baseline)
-        lipid_names.append(lipid)
 
-    # Concatenate across lipids
-    shift_df = pd.concat(aaaa_list, axis=1)
-    baseline_df = pd.concat(bbbb_list, axis=1)
-    shift_df.columns = lipid_names
-    baseline_df.columns = lipid_names
-
-    # Compute fold change
-    foldchange_df = shift_df / baseline_df
-
-    # Save results
-    shift_df.to_parquet(model_dir / f"shift_{output_prefix}.parquet")
-    baseline_df.to_parquet(model_dir / f"baseline_{output_prefix}.parquet")
-    foldchange_df.to_parquet(model_dir / f"foldchange_{output_prefix}.parquet")
-
-    print(f"Saved shift, baseline, and foldchange to {model_dir}")
-    return shift_df, baseline_df, foldchange_df
-
-def summarize_xsupertypes(
-    adata,
-    lipids_to_analyze,
-    supertypes=None,
-    model_dir=None,
-    output_prefix="pregnancy",
-    baseline_condition="naive",
-    upreg_threshold=0.2,
-    prob_threshold=0.98,
-    n_samples=1000
-):
-    """
-    For each lipid, compute upregulated, downregulated, and expressed supertypes using model parameter files.
-    Returns four DataFrames: upreg, downreg, expressed, and their union (all supertypes with any shift),
-    as well as lists: mean_score, ci_lowers, ci_uppers for the fraction of expressed supertypes that are also shifted (with 95% bootstrap CI).
-    Saves all as parquet files in the casecontrol_analysis directory.
-    """
-    import numpy as np
-    import pandas as pd
-    from tqdm import tqdm
-    from pathlib import Path
-    from scipy.special import expit
-
-    if supertypes is None:
-        supertypes = np.sort(adata.obs['supertype'].unique())
-    if model_dir is None:
-        model_dir = CASECONTROL_DIR
-    else:
-        model_dir = Path(model_dir)
-
-    lipid_upreg_xsupertypes = []
-    lipid_downreg_xsupertypes = []
-    lipid_expressed_xsupertypes = []
-    lipid_names = []
-
-    for lipid in tqdm(lipids_to_analyze):
-        param_path = model_dir / f"{lipid}_model_params.npy"
-        if not param_path.exists():
-            print(f"Warning: {param_path} not found, skipping.")
-            continue
-        params = np.load(param_path, allow_pickle=True).item()
-        loc_susc = params['alpha_supertype_susceptibility_loc']
-        scale_susc = params['alpha_supertype_susceptibility_scale']
-        loc_unconst = params['alpha_supertype_unconst_loc']
-        scale_unconst = params['alpha_supertype_unconst_scale']
-
-        # Draw samples for shift and baseline
-        samples_shift = np.random.default_rng(1234).normal(
-            loc=loc_susc[None, :],
-            scale=scale_susc[None, :],
-            size=(n_samples, loc_susc.shape[0])
-        )
-        samples_unconst = np.random.default_rng(1234).normal(
-            loc=loc_unconst[None, :],
-            scale=scale_unconst[None, :],
-            size=(n_samples, loc_unconst.shape[0])
-        )
-        samples_baseline = expit(samples_unconst)
-
-        # Upregulation: shift > threshold * baseline
-        upregulation = samples_shift > (upreg_threshold * samples_baseline)
-        downregulation = -samples_shift > (upreg_threshold * samples_baseline)
-        expressed = samples_baseline > 0.05
-
-        lipid_upreg_xsupertypes.append((np.mean(upregulation, axis=0) > prob_threshold).astype(float))
-        lipid_downreg_xsupertypes.append((np.mean(downregulation, axis=0) > prob_threshold).astype(float))
-        lipid_expressed_xsupertypes.append((np.mean(expressed, axis=0) > prob_threshold).astype(float))
-        lipid_names.append(lipid)
-
-    stindex = supertypes
-    lipid_upreg_xsupertypes_df = pd.DataFrame(lipid_upreg_xsupertypes, columns=stindex, index=lipid_names)
-    lipid_downreg_xsupertypes_df = pd.DataFrame(lipid_downreg_xsupertypes, columns=stindex, index=lipid_names)
-    lipid_expressed_xsupertypes_df = pd.DataFrame(lipid_expressed_xsupertypes, columns=stindex, index=lipid_names)
-    shifted_xsupertypes_df = lipid_upreg_xsupertypes_df | lipid_downreg_xsupertypes_df
-
-    # Save results
-    lipid_upreg_xsupertypes_df.to_parquet(model_dir / f"upreg_xsupertypes_{output_prefix}.parquet")
-    lipid_downreg_xsupertypes_df.to_parquet(model_dir / f"downreg_xsupertypes_{output_prefix}.parquet")
-    lipid_expressed_xsupertypes_df.to_parquet(model_dir / f"expressed_xsupertypes_{output_prefix}.parquet")
-    shifted_xsupertypes_df.to_parquet(model_dir / f"shifted_xsupertypes_{output_prefix}.parquet")
-
-    print(f"Saved upreg, downreg, expressed, and shifted xsupertypes to {model_dir}")
-
-    # --- Downstream: Bootstrap mean and CI for fraction of expressed supertypes that are also shifted ---
-    mean_score = []
-    ci_lowers = []
-    ci_uppers = []
-    for yyy in tqdm(range(lipid_expressed_xsupertypes_df.shape[0])):
-        exp = lipid_expressed_xsupertypes_df.iloc[yyy, :].values
-        shif = shifted_xsupertypes_df.iloc[yyy, :].values
-        n, B = len(exp), 10000
-        rng = np.random.default_rng(42)
-        # Bootstrap replicates
-        scores = [
-            (exp[idx] & shif[idx]).sum() / exp[idx].sum() if exp[idx].sum() > 0 else 0.0
-            for idx in rng.integers(0, n, size=(B, n))
+    def plot_comodulation_heatmap(
+        self,
+        shift,
+        baseline,
+        expressed,
+        shifted,
+        ddf,
+        baseline_condition="naive",
+        supertype_col="supertype",
+        todrop_supertypes=None,
+        todrop_lipids=None,
+        k_row=16,
+        thresh=0.5,
+        output_filename="overview_pregnancy_shifts.pdf",
+        figsize=(16, 10)
+    ):
+        """
+        Create a comprehensive comodulation heatmap showing log2 fold changes with optimal leaf ordering.
+        
+        This function takes the shifts and baseline data from case-control analysis and creates
+        a sophisticated visualization with multiple sidebars showing:
+        - Subclass colors  
+        - Row clusters
+        - Lipid class colors (top)
+        - Nonzero count bar plot (right)
+        """
+        
+        # Calculate log2 fold changes
+        shifts = np.log2((shift + baseline) / baseline).fillna(0)
+        
+        # Apply expressed and shifted filtering
+        exp = expressed.astype(bool)
+        shif = shifted.astype(bool)
+        # Zero out non-expressed or non-shifted values
+        shifts[~(exp & shif)] = 0.0
+        
+        # Apply filtering
+        if todrop_supertypes is None:
+            todrop_supertypes = []
+        if todrop_lipids is None:
+            todrop_lipids = []
+        
+        # Drop specified supertypes and lipids
+        shifts = shifts.drop(todrop_supertypes, errors='ignore')
+        shifts = shifts.drop(todrop_lipids, axis=1, errors='ignore')
+        
+        # Get control condition data for normalization
+        sub_alldata = self.adata.to_df()
+        sub_alldata[self.adata.obs.columns] = self.adata.obs
+        
+        df = sub_alldata.copy().loc[sub_alldata['Condition'] == baseline_condition, :]
+        features = shifts.columns.tolist()
+        
+        # Clip and normalize features
+        lower = df[features].quantile(0.005)
+        upper = df[features].quantile(0.995)
+        df_clipped = df.copy()
+        df_clipped[features] = df_clipped[features].clip(lower=lower, upper=upper, axis=1)
+        df_clipped[features] = (df_clipped[features] - lower) / (upper - lower)
+        centroids = df_clipped.groupby(supertype_col)[features].mean()
+        
+        # Reorder with optimal leaf ordering
+        (df_opt, row_L, col_L,
+         ordered_rows, ordered_cols,
+         rows_dense, cols_dense,
+         ordered_rows_main) = optimal_reorder_dataframe_cosine_clean(shifts,
+                                                                     method='weighted',
+                                                                     thresh=thresh)
+        
+        # Compute clusters on the main block
+        clusters_main = sch.fcluster(row_L, t=k_row, criterion='maxclust')
+        # order those clusters according to ordered_rows_main
+        df_main = shifts.loc[~rows_dense, ~cols_dense]
+        clusters_main_ordered = [
+            clusters_main[df_main.index.get_loc(lbl)]
+            for lbl in ordered_rows_main
         ]
-        # Point estimate and 95% CI
-        mean_score.append(np.mean(scores))
-        ci_lower, ci_upper = np.percentile(scores, [2.5, 97.5])
-        ci_lowers.append(ci_lower)
-        ci_uppers.append(ci_upper)
+        
+        # Build full cluster array, tagging held-aside rows as cluster k_row+1
+        n_dense_rows = rows_dense.sum()
+        misc_cluster = k_row + 1
+        row_clusters_full = np.concatenate([
+            clusters_main_ordered,
+            np.full(n_dense_rows, misc_cluster, dtype=int)
+        ])
+        
+        # Extract lipid-class colors from provided ddf
+        lipid_colors = [ddf.loc[col, 'color'] if col in ddf.index else "#888888"
+                        for col in df_opt.columns]
+        
+        # Create subclass color dictionary from adata
+        unique_supertypes = self.adata.obs[supertype_col].unique()
+        supertype_to_subclass = {}
+        
+        # Generate subclass colors
+        unique_supertype_list = sorted(unique_supertypes)
+        subclass_color_list = generate_distinct_colors(len(unique_supertype_list))
+        for i, st in enumerate(unique_supertype_list):
+            color_rgba = subclass_color_list[i]
+            # Convert to hex
+            hex_color = "#{:02x}{:02x}{:02x}".format(
+                int(color_rgba[0] * 255), 
+                int(color_rgba[1] * 255), 
+                int(color_rgba[2] * 255)
+            )
+            supertype_to_subclass[st] = hex_color
+        
+        # Create color arrays for rows
+        subclass_colors = [supertype_to_subclass.get(row_idx, "#888888") for row_idx in df_opt.index]
+        
+        # Convert hex colors to RGBA
+        subclass_rgba = [to_rgba(c) for c in subclass_colors]
+        
+        # Calculate nonzero counts for each row in the reordered dataframe
+        nonzero_counts = (df_opt != 0).sum(axis=1).values
+        
+        # Plot heatmap + sidebars
+        fig, ax = plt.subplots(figsize=figsize)
+        im = ax.imshow(df_opt.values, cmap='coolwarm', vmin=-1, vmax=1, aspect='auto')
+        
+        # Create divider for multiple sidebars
+        divider = make_axes_locatable(ax)
+        
+        # Subclass color sidebar (leftmost)
+        cax_subclass = divider.append_axes("left", size="2%", pad=0.05)
+        cax_subclass.imshow(np.array(subclass_rgba)[:, None, :], aspect='auto')
+        cax_subclass.set_xticks([])
+        cax_subclass.set_yticks([])
+        cax_subclass.set_ylabel("Subclass", rotation=0, ha='right', va='center')
+        
+        # Row‐cluster sidebar (second from left, with extra color for dense rows)
+        distinct = generate_distinct_colors(k_row + 1)
+        distinct[-1] = to_rgba("gray")
+        cmap_row = ListedColormap(distinct)
+        
+        cax_clusters = divider.append_axes("left", size="2%", pad=0.05)
+        cax_clusters.imshow(row_clusters_full[:, None], aspect='auto',
+                           cmap=cmap_row, vmin=1, vmax=k_row+1)
+        cax_clusters.set_xticks([])
+        cax_clusters.set_yticks([])
+        cax_clusters.set_ylabel("Clusters", rotation=0, ha='right', va='center')
+        
+        # Lipid‐class sidebar (top)
+        rgba = [to_rgba(c) for c in lipid_colors]
+        cax_top = divider.append_axes("top", size="2%", pad=0.05)
+        cax_top.imshow([rgba], aspect='auto')
+        cax_top.set_xticks([])
+        cax_top.set_yticks([])
+        
+        # Nonzero count bar plot (right side)
+        cax_bar = divider.append_axes("right", size="15%", pad=0.1)
+        y_positions = np.arange(len(nonzero_counts))
+        
+        # Clip counts at 50
+        clipped_counts = np.clip(nonzero_counts, 0, 50)
+        
+        # Get cluster colors for each bar
+        bar_colors = [distinct[cluster - 1] for cluster in row_clusters_full]
+        
+        cax_bar.barh(y_positions, clipped_counts, height=0.8, color=bar_colors, alpha=0.8)
+        cax_bar.set_ylim(-0.5, len(nonzero_counts) - 0.5)
+        cax_bar.set_xlim(0, 50)
+        cax_bar.invert_yaxis()  # Match heatmap orientation
+        cax_bar.set_xlabel("Nonzero Count (max 50)")
+        cax_bar.set_yticks([])  # Remove y-axis labels
+        cax_bar.grid(True, alpha=0.3, axis='x')
+        
+        # Draw boundaries only within the main block
+        bounds = np.where(np.diff(row_clusters_full[:len(ordered_rows_main)]) != 0)[0] + 0.5
+        for b in bounds:
+            ax.axhline(b, color='white', linewidth=1.5)
+            cax_clusters.axhline(b, color='white', linewidth=1.5)
+            # Optionally add boundaries to other sidebars too
+            cax_subclass.axhline(b, color='white', linewidth=0.5, alpha=0.7)
+            # Add boundaries to bar plot
+            cax_bar.axhline(b, color='white', linewidth=0.5, alpha=0.7)
+        
+        ax.set_xlabel("Lipids (Cosine OLO - colored by class)")
+        ax.set_ylabel("Supertypes (Cosine OLO - clustered)")
+        ax.set_title(f"Optimal Leaf Ordering - Both Dimensions\n"
+                     f"Cosine Distance + Weighted Linkage ({k_row} clusters)")
+        
+        plt.tight_layout()
+        plt.savefig(output_filename)
+        plt.show()
+        
+        # Summary
+        print(f"Main‐block rows clustered: {len(ordered_rows_main)}")
+        print(f"Held‐aside dense rows: {rows_dense.sum()}")
+        print(f"Held‐aside dense columns: {cols_dense.sum()}")
+        unique, counts = np.unique(row_clusters_full[:len(ordered_rows_main)], return_counts=True)
+        print("Cluster sizes (main block):")
+        for u, c in zip(unique, counts):
+            print(f" Cluster {u}: {c} rows")
+        
+        # ===== SPATIAL VISUALIZATION OF COMODULATION CLUSTERS =====
+        
+        # Alternative method without matplotlib (manual conversion)
+        def rgba_to_hex(rgba_array):
+            """Convert RGBA array (values 0-1) to hex string"""
+            r = int(rgba_array[0] * 255)
+            g = int(rgba_array[1] * 255)
+            b = int(rgba_array[2] * 255)
+            return f"#{r:02x}{g:02x}{b:02x}"
 
-    return (
-        lipid_upreg_xsupertypes_df,
-        lipid_downreg_xsupertypes_df,
-        lipid_expressed_xsupertypes_df,
-        shifted_xsupertypes_df,
-        mean_score,
-        ci_lowers,
-        ci_uppers
-    )
+        # Using manual method
+        bar_colors_hex_manual = [rgba_to_hex(rgba) for rgba in bar_colors]
+        colors = pd.Series(bar_colors_hex_manual, index=df_opt.index)
+        clusters_series = pd.Series(row_clusters_full, index=df_opt.index)
+        loool = pd.DataFrame((np.abs(shifts) > 0.2).sum(axis=1).sort_values(), columns = ['nmod'])
+        loool['linkage'] = loool.index.map(clusters_series)
+        loool['color'] = loool.index.map(colors)
+        loool['linkage'].value_counts()
+        loool.loc[loool['linkage'].isin(loool['linkage'].value_counts().index[loool['linkage'].value_counts() <= 4]), 'linkage'] = misc_cluster
+        loool['linkage'].value_counts() # cluster "misc_cluster" is miscellaneous
+        clusters_series = loool['linkage'][loool['linkage'] != misc_cluster]
+        colors_series = loool['color'][loool['linkage'] != misc_cluster]
+        
+        # Extract metadata from adata
+        metadata = self.adata.obs.copy()
+        Linkage_clusters = clusters_series.unique()
+        Linkage_colors = colors_series.unique()
+        color_df = pd.DataFrame({
+            'Linkage Cluster': Linkage_clusters,
+            'Color': Linkage_colors
+        })
+        
+        color_df.to_csv("color_df_pregnancy.csv")
+        metadata['cluster_variation'] = metadata[supertype_col].map(clusters_series).fillna("lightgray")
+        color_df.index = color_df['Linkage Cluster']
+        metadata['cluster_variation_color'] = metadata['cluster_variation'].map(color_df['Color'])
+        
+        # Create spatial grid visualization
+        unique_samples = sorted(metadata['Sample'].unique())
+        unique_sections = sorted(metadata['SectionPlot'].unique())
+        
+        fig2, axes = plt.subplots(6, 6, figsize=(20, 12))
+        
+        for sample_idx, sample in enumerate(unique_samples[:6]):
+            for section_idx, section in enumerate(unique_sections[:6]):
+                ax = axes[sample_idx, section_idx]
+        
+                ddf_spatial = metadata[
+                    (metadata['Sample'] == sample) & 
+                    (metadata['SectionPlot'] == section)
+                ]
+        
+                ax.scatter(
+                    ddf_spatial['y'], 
+                    -ddf_spatial['x'], 
+                    c=ddf_spatial['cluster_variation_color'].astype(object).fillna('#CCCCCC').tolist(),  
+                    s=0.5, 
+                    rasterized=True
+                )
+        
+                ax.axis('off')
+                ax.set_aspect('equal')
+        
+                ax.set_title(f'Sample {sample}, Section {section}', fontsize=8)
+        
+        plt.tight_layout(rect=[0, 0, 0.9, 1])
+        plt.savefig("comodulation_clusters.pdf")
+        plt.show()
+        
+        # Add comodulation clusters to adata.obs
+        self.adata.obs['comodulation_cluster'] = self.adata.obs[supertype_col].map(clusters_series).fillna(misc_cluster)
+        self.adata.obs['comodulation_cluster_color'] = self.adata.obs[supertype_col].map(colors_series).fillna('#CCCCCC')
 
-# --- Usage example ---
-# from euclid_msi.euclid_casecontrol import summarize_xsupertypes
-# upreg, downreg, expressed, shifted, mean_score, ci_lowers, ci_uppers = summarize_xsupertypes(
-#     adata,
-#     lipids_to_analyze=["PC 38:6", "HexCer 40:1;O2"],
-#     output_prefix="pregnancy"
-# )
+    def compute_edge_modulation_scores(
+        self,
+        foldchanges: pd.DataFrame,
+        metabolicmodule: pd.DataFrame,
+        comodulation_clusters: dict,
+        min_component_size: int = 2
+    ) -> dict:
+        """
+        Compute edge modulation scores per cluster, with pre-filtering to avoid NaNs,
+        and restrict to connected components of the metabolic network with at least
+        `min_component_size` lipids.
+
+        Parameters
+        ----------
+        foldchanges : pd.DataFrame
+            DataFrame of shape (n_supertypes, n_lipids) containing log2FC values.
+            Rows are supertypes, columns are lipids.
+        metabolicmodule : pd.DataFrame
+            Adjacency boolean matrix (lipids x lipids) indicating metabolic edges.
+        comodulation_clusters : dict
+            Mapping from cluster labels to lists of supertypes in each cluster.
+        min_component_size : int
+            Minimum number of lipids in a connected component to keep.
+
+        Returns
+        -------
+        modulation_scores : dict
+            Dictionary mapping each cluster label to a DataFrame (lipids x lipids)
+            of modulation scores for edges within that cluster.
+        """
+        # 0. Prefilter: keep only lipids present in both foldchanges and metabolicmodule
+        common_lipids = foldchanges.columns.intersection(metabolicmodule.index)
+        fc = foldchanges[common_lipids]
+        adj = metabolicmodule.loc[common_lipids, common_lipids].astype(int)
+
+        # Drop lipids with zero variance across supertypes to avoid NaNs in Z
+        stds = fc.std(axis=0)
+        zero_std = stds[stds == 0].index
+        if len(zero_std) > 0:
+            fc = fc.drop(columns=zero_std)
+            adj = adj.drop(index=zero_std, columns=zero_std)
+
+        # Further prefilter: keep only connected components with >= min_component_size
+        G0 = nx.from_pandas_adjacency(adj)
+        large_comps = [comp for comp in nx.connected_components(G0) if len(comp) >= min_component_size]
+        large_lipids = set().union(*large_comps)
+        # Restrict dataframes to those lipids
+        fc = fc[sorted(large_lipids)]
+        adj = adj.loc[sorted(large_lipids), sorted(large_lipids)]
+
+        # 1. Compute Z-scores per lipid across all supertypes
+        zscores = fc.sub(fc.mean(axis=0), axis=1).div(fc.std(axis=0), axis=1)
+
+        # 2. Precompute absolute Z-scores and adjacency
+        abs_z = zscores.abs().T  # shape = (lipids x supertypes)
+        abs_z[fc.T == 0] = 0  # what is zero should stay zero!
+
+        # 3. Compute per-supertype edge scores
+        edge_scores = {}
+        for supertype in zscores.index:
+            arr = abs_z[supertype].values
+            edge_vals = arr[:, None]*arr[None, :]  # use the product
+            edge_mat = pd.DataFrame(edge_vals, index=abs_z.index, columns=abs_z.index)
+            # mask by adjacency
+            edge_scores[supertype] = edge_mat * adj
+
+        # 4. Aggregate by cluster: mean of edge scores across supertypes in each cluster
+        modulation_scores = {}
+        for cluster_label, members in comodulation_clusters.items():
+            valid = [m for m in members if m in edge_scores]
+            if not valid:
+                raise ValueError(f"No valid supertypes in cluster {cluster_label} after filtering.")
+            summed = sum(edge_scores[m] for m in valid)
+            modulation_scores[cluster_label] = summed / len(valid)
+
+        return modulation_scores
+
+    def plot_modulation_thumbnails(
+        self,
+        modulation_scores: dict,
+        metabolicmodule: pd.DataFrame,
+        ddf: pd.DataFrame,
+        thresholds=0.1,
+        k=0.2,
+        palette=None,
+        max_width=5,
+        figsize_per_plot=(3, 3),
+        output_filename="comodclusters.pdf"
+    ):
+        """
+        Draw one thumbnail per cluster:
+        - Nodes in fixed layout (no labels)
+        - Edges only where score >= threshold for that cluster
+        - Edge width ∝ comodulation value
+        - Edge color = cluster color
+        - Connected nodes colored by ddf dataframe, others gray
+
+        Parameters
+        ----------
+        modulation_scores : dict[str, pd.DataFrame]
+            For each cluster c, a square DataFrame of com-modulation scores.
+        metabolicmodule : pd.DataFrame
+            Adjacency matrix of the underlying network (indexed by lipid).
+        ddf : pd.DataFrame
+            DataFrame with 'lipid_name' and 'color' columns for node coloring.
+        thresholds : float or dict[str, float]
+            If float, same threshold for all clusters; otherwise map cluster→threshold.
+        k : float
+            spring_layout "k" parameter.
+        palette : dict[str, color] or None
+            map cluster→hex color; defaults to 8-color palette.
+        max_width : float
+            Maximum edge width (for the largest score in each thumbnail).
+        figsize_per_plot : tuple
+            Size (w,h) of each thumbnail; total fig size calculated based on grid.
+        output_filename : str
+            Output filename for the saved plot.
+        """
+        # 1. Find common lipids & build graph
+        common = set.intersection(*(set(df.index) for df in modulation_scores.values()))
+        common_lipids = [L for L in metabolicmodule.index if L in common]
+        adj = metabolicmodule.loc[common_lipids, common_lipids].astype(int)
+        G = nx.from_pandas_adjacency(adj)
+
+        # 2. Compute one layout
+        pos = nx.spring_layout(G, seed=42, k=k, iterations=50)
+
+        # 3. Prepare clusters, thresholds, colors
+        clusters = list(modulation_scores.keys())
+        if isinstance(thresholds, dict):
+            thr_map = thresholds
+        else:
+            thr_map = {c: thresholds for c in clusters}
+
+        if palette is None:
+            base = ['#1b9e77', '#d95f02', '#7570b3', '#e7298a', '#66a61e', '#e6ab02', '#a6761d', '#666666']
+            palette = {c: base[i % len(base)] for i, c in enumerate(clusters)}
+        else:
+            # ensure every cluster has a color
+            palette = {c: palette.get(c, '#CCCCCC') for c in clusters}
+
+        # 4. Create lipid to color mapping from ddf
+        lipid_to_color = dict(zip(ddf['lipid_name'], ddf['color']))
+
+        # 5. Calculate grid layout (3 columns)
+        n = len(clusters)
+        ncols = 3
+        nrows = (n + ncols - 1) // ncols  # ceiling division
+        
+        # Scale node and edge sizes based on grid
+        node_size = max(4, 12 - nrows)  # smaller nodes for more rows
+        scaled_max_width = max(1, max_width * (8 / max(8, nrows)))  # scale edge width
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(figsize_per_plot[0]*ncols, figsize_per_plot[1]*nrows))
+        
+        # Handle case where we have only one row or one subplot
+        if nrows == 1 and ncols == 1:
+            axes = [axes]
+        elif nrows == 1:
+            axes = axes.reshape(1, -1)
+        elif ncols == 1:
+            axes = axes.reshape(-1, 1)
+
+        # Flatten axes for easier iteration if it's 2D
+        if nrows > 1 or ncols > 1:
+            axes_flat = axes.flatten()
+        else:
+            axes_flat = axes
+
+        # 6. Draw each thumbnail
+        for i, c in enumerate(clusters):
+            ax = axes_flat[i]
+            
+            # select edges above threshold
+            thr = thr_map[c]
+            scores = modulation_scores[c]
+            # only consider existing edges in G
+            edges = [(u, v) for u, v in G.edges() if not np.isnan(scores.loc[u, v]) and scores.loc[u, v] >= thr]
+            # get corresponding scores
+            values = np.array([scores.loc[u, v] for u, v in edges])
+            if len(values) > 0:
+                # scale widths so max → scaled_max_width
+                widths = (values / values.max()) * scaled_max_width
+            else:
+                widths = []
+
+            # Find connected nodes
+            connected_nodes = set()
+            for u, v in edges:
+                connected_nodes.add(u)
+                connected_nodes.add(v)
+
+            # Color nodes: connected nodes get color from ddf, others are gray
+            node_colors = []
+            node_sizes = []
+            for node in G.nodes():
+                if node in connected_nodes and node in lipid_to_color:
+                    node_colors.append(lipid_to_color[node])
+                    node_sizes.append(node_size * 8)  # 4x larger for connected nodes
+                else:
+                    node_colors.append('lightgray')
+                    node_sizes.append(node_size)  # regular size for unconnected nodes
+
+            # draw nodes and edges (edges in black)
+            nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_colors, ax=ax)
+            if edges:
+                nx.draw_networkx_edges(G, pos, edgelist=edges, width=widths, edge_color='black', ax=ax)
+            
+            # Add colored circle around the layout for cluster identification
+            # Get the bounding box of the layout
+            if pos:
+                x_coords = [pos[node][0] for node in pos]
+                y_coords = [pos[node][1] for node in pos]
+                center_x = (max(x_coords) + min(x_coords)) / 2
+                center_y = (max(y_coords) + min(y_coords)) / 2
+                radius = max(max(x_coords) - min(x_coords), max(y_coords) - min(y_coords)) / 2 * 1.2
+                
+                circle = plt.Circle((center_x, center_y), radius, fill=False, 
+                                  color=palette[c], linewidth=3, alpha=0.8, clip_on=False)
+                ax.add_patch(circle)
+            
+            ax.set_aspect('equal')    
+            ax.set_axis_off()
+
+        # Hide unused subplots
+        for i in range(n, len(axes_flat)):
+            axes_flat[i].set_visible(False)
+
+        plt.tight_layout(pad=1.0, w_pad=0.5, h_pad=0.5)
+        plt.savefig(output_filename)
+        plt.show()
+
+# Helper functions (standalone utilities)
+def cosine_clean(u, v):
+    """
+    Cosine distance computed only on positions where u or v is nonzero.
+    - If neither has any nonzero entries: distance = 0.0
+    - If one has nonzeros but the other is zero on all those positions: distance = 1.0
+    """
+    mask = (u != 0) | (v != 0)
+    if not mask.any():
+        return 0.0
+    u2, v2 = u[mask], v[mask]
+    nu, nv = np.linalg.norm(u2), np.linalg.norm(v2)
+    if nu == 0 or nv == 0:
+        return 1.0
+    sim = np.dot(u2, v2) / (nu * nv)
+    return 1.0 - sim
+
+
+def optimal_reorder_dataframe_cosine_clean(df, method='weighted', thresh=0.8):
+    """
+    1) Hold aside rows with >thresh fraction nonzero, and likewise for columns.
+    2) Cluster only the remaining "main" submatrix with our custom cosine_clean.
+    3) Reassemble a reordered df with held‐aside columns on the right, rows on the bottom.
+    """
+    n_rows, n_cols = df.shape
+    
+    # DEBUG: show the true per-row densities
+    row_frac = (df != 0).sum(axis=1) / n_cols
+    print(f"Using threshold = {thresh}")
+    print(f"Rows with frac > thresh: {(row_frac > thresh).sum()} / {n_rows}")
+    print("Those rows are:", list(row_frac[row_frac > thresh].index))
+
+    
+    # 1) identify dense rows & columns
+    row_frac = (df != 0).sum(axis=1) / n_cols
+    col_frac = (df != 0).sum(axis=0) / n_rows
+    rows_dense = row_frac > thresh
+    cols_dense = col_frac > thresh
+
+    # main block for clustering
+    df_main = df.loc[~rows_dense, ~cols_dense]
+
+    # 2a) column clustering on main
+    col_d = pdist(df_main.T.values, metric=cosine_clean)
+    col_L = sch.linkage(col_d, method=method, optimal_ordering=True)
+    col_order = sch.leaves_list(col_L)
+
+    # 2b) row clustering on main
+    row_d = pdist(df_main.values, metric=cosine_clean)
+    row_L = sch.linkage(row_d, method=method, optimal_ordering=True)
+    row_order = sch.leaves_list(row_L)
+
+    # labels in main
+    cols_main = df_main.columns.tolist()
+    rows_main = df_main.index.tolist()
+
+    # ordered labels in main
+    ordered_cols_main = [cols_main[i] for i in col_order]
+    ordered_rows_main = [rows_main[i] for i in row_order]
+
+    # 3) full ordering: main first, then dense ones
+    ordered_cols = ordered_cols_main + df.columns[cols_dense].tolist()
+    ordered_rows = ordered_rows_main + df.index[rows_dense].tolist()
+    df_reordered = df.loc[ordered_rows, ordered_cols]
+
+    return df_reordered, row_L, col_L, ordered_rows, ordered_cols, rows_dense, cols_dense, ordered_rows_main
+
+
+def generate_distinct_colors(n):
+    """Generate n visually distinct colors."""
+    if n <= 20:
+        return plt.cm.tab20(np.linspace(0, 1, min(n, 20)))
+    hues = np.linspace(0, 1, n, endpoint=False)
+    return [plt.cm.hsv(h) for h in hues]
+
+
+# === Backward compatibility wrapper functions ===
+
+def run_case_control_analysis(adata, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.run_case_control_analysis(**kwargs)
+
+def summarize_case_control_results(adata, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.summarize_case_control_results(**kwargs)
+
+def summarize_xsupertypes(adata, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.summarize_xsupertypes(**kwargs)
+
+def plot_comodulation_heatmap(adata, shift, baseline, expressed, shifted, ddf, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.plot_comodulation_heatmap(shift, baseline, expressed, shifted, ddf, **kwargs)
+
+def compute_edge_modulation_scores(adata, foldchanges, metabolicmodule, comodulation_clusters, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.compute_edge_modulation_scores(foldchanges, metabolicmodule, comodulation_clusters, **kwargs)
+
+def plot_modulation_thumbnails(adata, modulation_scores, metabolicmodule, ddf, **kwargs):
+    """Backward compatibility wrapper for the class-based API."""
+    cc = CaseControlAnalysis(adata)
+    return cc.plot_modulation_thumbnails(modulation_scores, metabolicmodule, ddf, **kwargs)
 

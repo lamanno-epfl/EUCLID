@@ -61,7 +61,7 @@ from statsmodels.stats.multitest import multipletests
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 from kneed import KneeLocator
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfMerger, PdfReader
 
 # Set thread limits and suppress warnings
 threadpool_limits(limits=8)
@@ -97,59 +97,64 @@ class Clustering:
     emb: a EUCLID Embedding object
     """
     def __init__(self, emb):
-        
-        try:
-            self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_Harmonized']),
-                                                          index=emb.adata.obs_names)
-        except:
-            self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_NMF']),
-                                                          index=emb.adata.obs_names)
-        metadata = emb.adata.obs.copy()
-        coordinates = metadata[['x','y','SectionID', 'SectionID']]
-        coordinates.columns = ["zccf","yccf","Section","xccf"]
-        
-        self.adata = emb.adata
-        self.coordinates = coordinates
-        self.reconstructed_data_df = pd.DataFrame(
-            emb.adata.obsm['X_approximated'],
-            index=emb.adata.obs_names
-        )
-        self.metadata = metadata
-        
-        vcnorm = self.coordinates.loc[self.reconstructed_data_df.index, 'Section'] \
-             .value_counts()
-        vcnorm.index = vcnorm.index.astype(int)
-        vcnorm = vcnorm.sort_index()
-        
-        data = pd.DataFrame(
-            self.adata.X,
-            index=self.adata.obs_names,
-            columns=self.adata.var_names
-        )
-        rawlips = data.copy()
-        data = self.reconstructed_data_df
-        
-        # do vmin-vmax normalization with the percentiles + clipping for differential lipids testing
-        datemp = rawlips.copy() 
-        p2 = datemp.quantile(0.02)
-        p98 = datemp.quantile(0.98)
 
-        datemp_values = datemp.values
-        p2_values = p2.values
-        p98_values = p98.values
+        if emb is None:
+            self.adata = None
 
-        normalized_values = (datemp_values - p2_values) / (p98_values - p2_values)
+        else:
+            
+            try:
+                self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_Harmonized']),
+                                                            index=emb.adata.obs_names)
+            except:
+                self.standardized_embeddings_GLOBAL = pd.DataFrame(StandardScaler().fit_transform(emb.adata.obsm['X_NMF']),
+                                                            index=emb.adata.obs_names)
+            metadata = emb.adata.obs.copy()
+            coordinates = metadata[['x','y','SectionID', 'SectionID']]
+            coordinates.columns = ["zccf","yccf","Section","xccf"]
+            
+            self.adata = emb.adata
+            self.coordinates = coordinates
+            self.reconstructed_data_df = pd.DataFrame(
+                emb.adata.obsm['X_approximated'],
+                index=emb.adata.obs_names
+            )
+            self.metadata = metadata
+            
+            vcnorm = self.coordinates.loc[self.reconstructed_data_df.index, 'Section'] \
+                .value_counts()
+            vcnorm.index = vcnorm.index.astype(int)
+            vcnorm = vcnorm.sort_index()
+            
+            data = pd.DataFrame(
+                self.adata.X,
+                index=self.adata.obs_names,
+                columns=self.adata.var_names
+            )
+            rawlips = data.copy()
+            data = self.reconstructed_data_df
+            
+            # do vmin-vmax normalization with the percentiles + clipping for differential lipids testing
+            datemp = rawlips.copy() 
+            p2 = datemp.quantile(0.02)
+            p98 = datemp.quantile(0.98)
 
-        clipped_values = np.clip(normalized_values, 0, 1)
+            datemp_values = datemp.values
+            p2_values = p2.values
+            p98_values = p98.values
 
-        normalized_datemp = pd.DataFrame(clipped_values, columns=datemp.columns, index=datemp.index)
+            normalized_values = (datemp_values - p2_values) / (p98_values - p2_values)
 
-        self.adatamaia = sc.AnnData(X=data)
-        self.adatamaia.obsm['spatial'] = self.coordinates[['zccf', 'yccf', 'Section']].loc[data.index,:].values
+            clipped_values = np.clip(normalized_values, 0, 1)
 
-        self.adatamaia.obsm['lipids'] = normalized_datemp
+            normalized_datemp = pd.DataFrame(clipped_values, columns=datemp.columns, index=datemp.index)
 
-        self.adatamaia.obsm['X_TSNE'] = emb.adata.obsm['X_TSNE']
+            self.adatamaia = sc.AnnData(X=data)
+            self.adatamaia.obsm['spatial'] = self.coordinates[['zccf', 'yccf', 'Section']].loc[data.index,:].values
+
+            self.adatamaia.obsm['lipids'] = normalized_datemp
+
+            self.adatamaia.obsm['X_TSNE'] = emb.adata.obsm['X_TSNE']
 
     # -------------------------------------------------------------------------
     # BLOCK 1: Conventional Leiden clustering on harmonized NMF embeddings
@@ -1224,6 +1229,37 @@ class Clustering:
     # -------------------------------------------------------------------------
     # BLOCK 6: Plot each cluster to separate PDF files for inspection.
     # -------------------------------------------------------------------------
+    def clean_corrupted_pdfs(self, output_folder="lipizones_output"):
+        """
+        Clean up any corrupted PDF files in the output folder.
+        
+        Parameters
+        ----------
+        output_folder : str, optional
+            Folder containing the PDF files to check.
+        """
+        if not os.path.exists(output_folder):
+            return
+            
+        corrupted_files = []
+        for fname in os.listdir(output_folder):
+            if fname.endswith(".pdf"):
+                pdf_path = os.path.join(output_folder, fname)
+                try:
+                    test_reader = PdfReader(pdf_path)
+                    # Try to access the first page to ensure file is valid
+                    if len(test_reader.pages) > 0:
+                        _ = test_reader.pages[0]
+                except Exception as e:
+                    print(f"Removing corrupted PDF: {fname}")
+                    corrupted_files.append(fname)
+                    os.remove(pdf_path)
+        
+        if corrupted_files:
+            print(f"Cleaned up {len(corrupted_files)} corrupted PDF files")
+        else:
+            print("No corrupted PDF files found")
+
     def clusters_to_pdf(self, output_folder="lipizones_output", pdf_filename="clusters_combined.pdf"):
         """
         Plot each cluster (lipizone) separately into PDF files.
@@ -1273,19 +1309,50 @@ class Clustering:
                 fig.delaxes(axes[j])
             plt.suptitle(uniq)
             plt.tight_layout()
-            outpath = os.path.join(output_folder, f"{uniq}.pdf")
-            plt.savefig(outpath)
-            plt.close(fig)
+            # Replace "/" with "_" in filename to avoid directory separator issues
+            safe_filename = uniq.replace("/", "_").replace("\\", "_")
+            outpath = os.path.join(output_folder, f"{safe_filename}.pdf")
+            try:
+                plt.savefig(outpath, bbox_inches='tight', dpi=150)
+                plt.close(fig)
+            except Exception as e:
+                print(f"Warning: Failed to save PDF for {uniq}: {str(e)}")
+                plt.close(fig)
+                # Remove potentially corrupted file
+                if os.path.exists(outpath):
+                    os.remove(outpath)
         # Merge all PDFs into one
         cwd = os.getcwd()
         merger = PdfMerger()
+        successful_merges = 0
+        failed_files = []
+        
         for fname in sorted(os.listdir(output_folder)):
             if fname.endswith(".pdf"):
-                merger.append(os.path.join(output_folder, fname))
-        final_pdf = os.path.join(cwd, pdf_filename)
-        merger.write(final_pdf)
-        merger.close()
-        print(f"Merged PDF saved as {final_pdf}")
+                pdf_path = os.path.join(output_folder, fname)
+                try:
+                    # Test if the PDF can be read before merging
+                    from PyPDF2 import PdfReader
+                    test_reader = PdfReader(pdf_path)
+                    # If we can read it, add it to the merger
+                    merger.append(pdf_path)
+                    successful_merges += 1
+                except Exception as e:
+                    print(f"Warning: Skipping corrupted PDF {fname}: {str(e)}")
+                    failed_files.append(fname)
+                    continue
+        
+        if successful_merges > 0:
+            final_pdf = os.path.join(cwd, pdf_filename)
+            merger.write(final_pdf)
+            merger.close()
+            print(f"Merged PDF saved as {final_pdf}")
+            print(f"Successfully merged {successful_merges} PDFs")
+            if failed_files:
+                print(f"Failed to merge {len(failed_files)} PDFs: {failed_files}")
+        else:
+            merger.close()
+            print("Error: No valid PDFs found to merge")
 
     def compare_leiden_lipizone(self, leiden_key="X_Leiden", lipizone_key="lipizone", output_file=None):
         """
@@ -1476,4 +1543,39 @@ class Clustering:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.show()
+
+    def save_msi_dataset(self, filename="clustering_msi_dataset.h5ad"):
+        """
+        Save the current AnnData object to disk.
+
+        Parameters
+        ----------
+        filename : str, optional
+            File path to save the AnnData object.
+        """
+        self.adata.write_h5ad(filename)
+
+    def load_msi_dataset(self, filename="clustering_msi_dataset.h5ad"):
+        """
+        Load an AnnData object from disk and reinitialize the Clustering object.
+
+        Parameters
+        ----------
+        filename : str, optional
+            File path from which to load the AnnData object.
+
+        Returns
+        -------
+        sc.AnnData
+            The loaded AnnData object.
+        """
+
+        class EmbeddingWrapper:
+            def __init__(self, adata):
+                self.adata = adata
+
+        adata = sc.read_h5ad(filename)
+        emb_wrapper = EmbeddingWrapper(adata)
+        self.__init__(emb_wrapper)
+
 
