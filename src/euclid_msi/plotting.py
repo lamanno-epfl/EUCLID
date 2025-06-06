@@ -9,7 +9,7 @@ dynamic grid layouts for multi-section plots, filtering by metadata, and hierarc
 (using a user-provided hierarchical level to determine modal "lipizone_color").
   
 Expected AnnData structure example:
-    obs: 'SectionID', 'x', 'y', 'Path', 'Sample', 'Sex', 'Condition', 'Section', 'BadSection',
+    obs: 'SectionID', 'x', 'y', 'Path', 'Sample', 'Sex', 'Condition', 'SectionID', 'BadSection',
          'X_Leiden', 'X_Euclid', 'lipizone_colors', 'allen_division', 'boundary', 'acronym', etc.
     uns: 'feature_selection_scores', 'neighbors'
     obsm: 'X_NMF', 'X_Harmonized', 'X_approximated', 'X_TSNE', 'X_restored'
@@ -65,13 +65,13 @@ class Plotting:
     adata : sc.AnnData
         The AnnData object containing processed MSI data.
     coordinates : pd.DataFrame
-        DataFrame with spatial coordinates (e.g. 'Section', 'xccf', 'yccf', 'zccf').
+        DataFrame with spatial coordinates (e.g. 'SectionID', 'xccf', 'yccf', 'zccf').
     extra_data : dict, optional
         Additional data (e.g. feature selection scores) stored in adata.uns or elsewhere.
     """
     def __init__(self, adata, extra_data=None):
         self.adata = adata
-        self.coordinates = self.adata.obs[['Section', 'xccf', 'yccf', 'zccf']]
+        self.coordinates = self.adata.obs[['SectionID', 'xccf', 'yccf', 'zccf']]
         self.extra_data = extra_data if extra_data is not None else {}
 
     @staticmethod
@@ -202,7 +202,7 @@ class Plotting:
         Parameters
         ----------
         data : pd.DataFrame
-            DataFrame with spatial columns ('zccf', 'yccf', 'xccf', 'Section') and lipid values.
+            DataFrame with spatial columns ('zccf', 'yccf', 'xccf', 'SectionID') and lipid values.
         lipid : str
             Column name (feature) to plot.
         section_filter : list, optional
@@ -225,7 +225,7 @@ class Plotting:
             If True, display plot inline.
         """
         
-        coords = self.adata.obs[["zccf", "yccf", "xccf", "Section", "division", "boundary"]].copy()
+        coords = self.adata.obs[["zccf", "yccf", "xccf", "SectionID", "division", "boundary", list(lipizone_filter.keys())[0]]].copy()
         lipid_idx = list(self.adata.var_names).index(lipid)
 
         lipid_values = self.adata.X[:, lipid_idx].flatten() 
@@ -239,7 +239,7 @@ class Plotting:
             for col, accepted in metadata_filter.items():
                 df = df[df[col].isin(accepted)]
         if section_filter is not None:
-            df = df[df["Section"].isin(section_filter)]
+            df = df[df["SectionID"].isin(section_filter)]
         if lipizone_filter:
             for col, accepted in lipizone_filter.items():
                 df = df[df[col].isin(accepted)]
@@ -250,7 +250,7 @@ class Plotting:
         if z_range is not None:
             df = df[(df["zccf"] >= z_range[0]) & (df["zccf"] <= z_range[1])]
 
-        unique_sections = sorted(df["Section"].unique())
+        unique_sections = sorted(df["SectionID"].unique())
         n_sections = len(unique_sections)
         if n_sections == 0:
             print("No sections to plot after filtering.")
@@ -258,11 +258,11 @@ class Plotting:
         # For each section, compute 2nd and 98th percentiles for the given lipid; then take medians.
         results = []
         for sec in unique_sections:
-            subset = df[df["Section"] == sec]
+            subset = df[df["SectionID"] == sec]
             perc2 = subset[lipid].quantile(0.02)
             perc98 = subset[lipid].quantile(0.98)
             results.append([sec, perc2, perc98])
-        percentile_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
+        percentile_df = pd.DataFrame(results, columns=["SectionID", "2-perc", "98-perc"])
         med2p = percentile_df["2-perc"].median()
         med98p = percentile_df["98-perc"].median()
         # Global axis limits.
@@ -278,7 +278,39 @@ class Plotting:
         axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
         for idx, sec in enumerate(unique_sections):
             ax = axes[idx]
-            sec_data = df[df["Section"] == sec]
+            sec_data = df[df["SectionID"] == sec]
+            
+            # Plot background: entire section in grayscale based on lipizone_names
+            # Get all data for this section for background
+            background_data = self.adata.obs[self.adata.obs["SectionID"] == sec] if "SectionID" in self.adata.obs.columns else self.adata.obs
+            
+            if "lipizone_names" in background_data.columns and not background_data.empty:
+                # Create a mapping from lipizone_names to gray values
+                unique_lipizone_names = background_data["lipizone_names"].unique()
+                unique_lipizone_names = unique_lipizone_names[pd.notna(unique_lipizone_names)]  # Remove NaN values
+                
+                if len(unique_lipizone_names) > 0:
+                    # Create grayscale colormap - distribute gray values evenly
+                    gray_values = np.linspace(0.2, 0.8, len(unique_lipizone_names))  # Avoid pure black/white
+                    lipizone_to_gray = dict(zip(unique_lipizone_names, gray_values))
+                    
+                    # Map each point to its gray value
+                    background_colors = background_data["lipizone_names"].map(lipizone_to_gray)
+                    
+                    # Plot background points using same coordinate system
+                    valid_background = background_data.dropna(subset=["zccf", "yccf", "lipizone_names"])
+                    if not valid_background.empty:
+                        ax.scatter(
+                            valid_background["zccf"], 
+                            -valid_background["yccf"], 
+                            c=background_colors[valid_background.index], 
+                            cmap='gray',
+                            s=point_size * 0.5,  # Smaller than foreground points
+                            alpha=0.3,
+                            rasterized=True
+                        )
+            
+            # Plot the lipid data (foreground)
             ax.scatter(sec_data["zccf"], -sec_data["yccf"],
                        c=sec_data[lipid], cmap="plasma", s=point_size,
                        alpha=0.8, rasterized=True, vmin=med2p, vmax=med98p)
@@ -318,7 +350,7 @@ class Plotting:
         """
         Plot spatial embeddings from adata.obsm[key], coloring by the chosen embedding‐column index.
 
-        For each section (as found in adata.obs["Section"]), compute that section's
+        For each section (as found in adata.obs["SectionID"]), compute that section's
         2nd and 98th percentile of embedding‐column `currentProgram`. Then take the
         median across all sections to fix vmin/vmax. Plot each section in its own subplot.
 
@@ -339,8 +371,8 @@ class Plotting:
         """
         # 1) Sanity checks
         data = self.adata.obs
-        if "Section" not in data.columns:
-            raise ValueError("`adata.obs` must contain a 'Section' column.")
+        if "SectionID" not in data.columns:
+            raise ValueError("`adata.obs` must contain a 'SectionID' column.")
         if key not in self.adata.obsm:
             raise ValueError(f"Key '{key}' not found in adata.obsm.")
         
@@ -353,7 +385,7 @@ class Plotting:
             raise IndexError(f"currentProgram={currentProgram} is out of bounds for embeddings with {n_dims} columns.")
         
         # 2) Decide which sections to plot
-        sections = sorted(data["Section"].unique())
+        sections = sorted(data["SectionID"].unique())
         n_plots   = len(sections)
         nrows, ncols = layout
         total_axes = nrows * ncols
@@ -368,7 +400,7 @@ class Plotting:
         # 3) Compute 2nd/98th percentile for each section's embedding‐column
         results = []
         for sec in sections:
-            mask = (data["Section"] == sec).to_numpy()
+            mask = (data["SectionID"] == sec).to_numpy()
             if np.count_nonzero(mask) < 2:
                 # skip if fewer than 2 cells in that section
                 continue
@@ -380,7 +412,7 @@ class Plotting:
         if len(results) == 0:
             raise RuntimeError("No section had ≥2 cells to compute percentiles.")
         
-        pct_df = pd.DataFrame(results, columns=["Section", "2-perc", "98-perc"])
+        pct_df = pd.DataFrame(results, columns=["SectionID", "2-perc", "98-perc"])
         med2p  = pct_df["2-perc"].median()
         med98p = pct_df["98-perc"].median()
         
@@ -394,7 +426,7 @@ class Plotting:
         # 5) Plot each section in its own subplot
         for idx, sec in enumerate(sections):
             ax   = axes[idx]
-            mask = (data["Section"] == sec).to_numpy()
+            mask = (data["SectionID"] == sec).to_numpy()
             
             # If no cells in this section, just turn off axis
             if not mask.any():
@@ -441,7 +473,7 @@ class Plotting:
 
     def plot_lipizones(self, levels: pd.DataFrame,
                        lipizone_col: str = "lipizone_names",
-                       section_col: str = "Section",
+                       section_col: str = "SectionID",
                        level_filter: str = None,
                        show_inline: bool = True) -> None:
         """
@@ -479,6 +511,15 @@ class Plotting:
             df["plot_color"] = df.apply(get_modal, axis=1)
         else:
             df["plot_color"] = df["lipizone_color"]
+        
+        # Fill NaN colors with gray (handle categorical columns)
+        if df["plot_color"].dtype.name == 'category':
+            # Add "gray" to categories if not already present
+            if "gray" not in df["plot_color"].cat.categories:
+                df["plot_color"] = df["plot_color"].cat.add_categories(["gray"])
+            df["plot_color"] = df["plot_color"].fillna("gray")
+        else:
+            df["plot_color"] = df["plot_color"].fillna("gray")
 
         unique_sections = sorted(df[section_col].unique())
         n_sections = len(unique_sections)
@@ -869,7 +910,7 @@ class Plotting:
         """Placeholder for making a movie from the data."""
         print("make_movie not implemented yet.")
 
-    def plot_global_lipidomic_similarity(self, show_inline: bool = True) -> None:
+    def plot_global_lipidomic_similarity(self, show_inline: bool = True, coloring="subclass") -> None:
         """
         Plot global lipidomic similarity patterns by subclass, coloring each pixel by subclass similarity.
         Subclasses are sorted by similarity, assigned a rainbow colormap, and plotted as in plot_lipizones.
@@ -877,13 +918,13 @@ class Plotting:
         import numpy as np
         import matplotlib.cm as cm
         import matplotlib.colors as mcolors
-        # 1. Average adata.X by subclass
-        if 'subclass' not in self.adata.obs.columns:
-            raise ValueError("'subclass' column not found in adata.obs")
+        # 1. Average adata.X by coloring
+        if coloring not in self.adata.obs.columns:
+            raise ValueError("coloring column not found in adata.obs")
         df = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs.index)
-        df['subclass'] = self.adata.obs['subclass'].values
-        normalized_df = df.groupby('subclass').mean()
-        # 2. Sort subclasses by similarity (cumulative distance along the mean vectors)
+        df[coloring] = self.adata.obs[coloring].values
+        normalized_df = df.groupby(coloring).mean()
+        # 2. Sort coloring by similarity (cumulative distance along the mean vectors)
         X = normalized_df.values
         diffs = np.linalg.norm(X[1:] - X[:-1], axis=1)
         cumdist = np.concatenate([[0.0], np.cumsum(diffs)])
@@ -893,13 +934,13 @@ class Plotting:
         rgba_colors = cmap(t)
         hex_colors = [mcolors.to_hex(c) for c in rgba_colors]
         color_dict = dict(zip(normalized_df.index, hex_colors))
-        # 4. Assign color to each pixel by subclass
-        subclass_colors = self.adata.obs['subclass'].map(color_dict)
+        # 4. Assign color to each pixel by coloring
+        coloring_colors = self.adata.obs[coloring].map(color_dict)
         # 5. Prepare DataFrame for plotting (like plot_lipizones)
-        coords = self.adata.obs[['zccf', 'yccf', 'xccf', 'Section']].copy()
-        coords['subclass'] = self.adata.obs['subclass']
-        coords['plot_color'] = subclass_colors.values
-        unique_sections = sorted(coords['Section'].unique())
+        coords = self.adata.obs[['zccf', 'yccf', 'xccf', 'SectionID']].copy()
+        coords[coloring] = self.adata.obs[coloring]
+        coords['plot_color'] = coloring_colors.values
+        unique_sections = sorted(coords['SectionID'].unique())
         n_sections = len(unique_sections)
         if n_sections == 0:
             print("No sections to plot.")
@@ -914,7 +955,7 @@ class Plotting:
         axes = axes.flatten()
         for idx, sec in enumerate(unique_sections):
             ax = axes[idx]
-            sec_data = coords[coords['Section'] == sec]
+            sec_data = coords[coords['SectionID'] == sec]
             ax.scatter(sec_data['zccf'], -sec_data['yccf'],
                        c=sec_data['plot_color'], s=0.5, alpha=0.8, rasterized=True)
             ax.axis('off')

@@ -132,21 +132,25 @@ class Postprocessing:
         annotation_image : np.ndarray, optional
             3D anatomical annotation image.
         """
-        self.adata = emb.adata
-        try:
-            self.embeddings = emb.adata.obsm['X_Harmonized']
-        except:
-            self.embeddings = emb.adata.obsm['X_NMF']
-        self.morans = morans
-        self.alldata = pd.DataFrame(
-            self.adata.obsm['peaks'], 
-            index=self.adata.obs.index,
-            columns=self.adata.uns['peak_names']
-        )
-        self.pixels = self.adata.obs.copy()
-        self.coordinates = self.pixels[['SectionID', 'x', 'y']]
-        self.reference_image = reference_image
-        self.annotation_image = annotation_image
+        if emb is None:
+            self.adata = None
+
+        else:
+            self.adata = emb.adata
+            try:
+                self.embeddings = emb.adata.obsm['X_Harmonized']
+            except:
+                self.embeddings = emb.adata.obsm['X_NMF']
+            self.morans = morans
+            self.alldata = pd.DataFrame(
+                self.adata.obsm['peaks'], 
+                index=self.adata.obs.index,
+                columns=self.adata.uns['peak_names']
+            )
+            self.pixels = self.adata.obs.copy()
+            self.coordinates = self.pixels[['SectionID', 'x', 'y']]
+            self.reference_image = reference_image
+            self.annotation_image = annotation_image
 
     def save_msi_dataset(
         self,
@@ -168,6 +172,149 @@ class Postprocessing:
         
         # Save the AnnData object
         adata_to_save.write_h5ad(filename)
+
+    def load_msi_dataset(self, filename="msi_dataset_postprocessing_ops.h5ad"):
+        """
+        Load an AnnData object from disk.
+
+        Parameters
+        ----------
+        filename : str, optional
+            File path from which to load the AnnData object.
+
+        Returns
+        -------
+        sc.AnnData
+            The loaded AnnData object.
+        """
+        adata = sc.read_h5ad(filename)
+        self.adata = adata
+
+    def merge_adata_objects(self, source_adata):
+        """
+        Merge content from a source AnnData object into the current postprocessing adata.
+        
+        This function transfers all information from obs, var, uns, and obsm attributes
+        from the source_adata that is not yet present in self.adata, avoiding duplicates.
+        
+        Parameters
+        ----------
+        source_adata : sc.AnnData
+            The source AnnData object (e.g., from clustering) to merge from.
+        
+        Returns
+        -------
+        None
+            Updates self.adata in place.
+        """
+        import pandas as pd
+        import numpy as np
+        
+        if source_adata is None:
+            print("Warning: source_adata is None, nothing to merge.")
+            return
+            
+        if self.adata is None:
+            print("Warning: self.adata is None, cannot merge.")
+            return
+        
+        # Check if the indices match (observations should be the same)
+        if not self.adata.obs.index.equals(source_adata.obs.index):
+            print("Warning: AnnData objects have different observation indices. "
+                  "Merging might lead to unexpected results.")
+        
+        print(f"Merging AnnData objects:")
+        print(f"  Target (postproc) shape: {self.adata.shape}")
+        print(f"  Source (clust) shape: {source_adata.shape}")
+        
+        # 1. Merge obs (observation metadata)
+        obs_cols_to_add = []
+        for col in source_adata.obs.columns:
+            if col not in self.adata.obs.columns:
+                obs_cols_to_add.append(col)
+        
+        if obs_cols_to_add:
+            print(f"  Adding {len(obs_cols_to_add)} new obs columns: {obs_cols_to_add}")
+            for col in obs_cols_to_add:
+                self.adata.obs[col] = source_adata.obs[col]
+        else:
+            print("  No new obs columns to add.")
+        
+        # 2. Merge var (variable metadata)
+        var_cols_to_add = []
+        for col in source_adata.var.columns:
+            if col not in self.adata.var.columns:
+                var_cols_to_add.append(col)
+        
+        if var_cols_to_add:
+            print(f"  Adding {len(var_cols_to_add)} new var columns: {var_cols_to_add}")
+            for col in var_cols_to_add:
+                # Only add if the variable indices match
+                if self.adata.var.index.equals(source_adata.var.index):
+                    self.adata.var[col] = source_adata.var[col]
+                else:
+                    print(f"    Warning: Variable indices don't match, skipping var column {col}")
+        else:
+            print("  No new var columns to add.")
+        
+        # 3. Merge uns (unstructured metadata)
+        uns_keys_to_add = []
+        for key in source_adata.uns.keys():
+            if key not in self.adata.uns.keys():
+                uns_keys_to_add.append(key)
+        
+        if uns_keys_to_add:
+            print(f"  Adding {len(uns_keys_to_add)} new uns keys: {uns_keys_to_add}")
+            for key in uns_keys_to_add:
+                self.adata.uns[key] = source_adata.uns[key]
+        else:
+            print("  No new uns keys to add.")
+        
+        # 4. Merge obsm (observation matrices)
+        obsm_keys_to_add = []
+        for key in source_adata.obsm.keys():
+            if key not in self.adata.obsm.keys():
+                obsm_keys_to_add.append(key)
+        
+        if obsm_keys_to_add:
+            print(f"  Adding {len(obsm_keys_to_add)} new obsm keys: {obsm_keys_to_add}")
+            for key in obsm_keys_to_add:
+                # Check if dimensions match
+                if source_adata.obsm[key].shape[0] == self.adata.n_obs:
+                    self.adata.obsm[key] = source_adata.obsm[key]
+                    print(f"    Added obsm['{key}'] with shape {source_adata.obsm[key].shape}")
+                else:
+                    print(f"    Warning: obsm['{key}'] has incompatible shape "
+                          f"{source_adata.obsm[key].shape}, expected first dimension {self.adata.n_obs}")
+        else:
+            print("  No new obsm keys to add.")
+        
+        # 5. Merge varm (variable matrices) if present
+        if hasattr(source_adata, 'varm') and len(source_adata.varm.keys()) > 0:
+            varm_keys_to_add = []
+            for key in source_adata.varm.keys():
+                if key not in self.adata.varm.keys():
+                    varm_keys_to_add.append(key)
+            
+            if varm_keys_to_add:
+                print(f"  Adding {len(varm_keys_to_add)} new varm keys: {varm_keys_to_add}")
+                for key in varm_keys_to_add:
+                    # Check if dimensions match
+                    if source_adata.varm[key].shape[0] == self.adata.n_vars:
+                        self.adata.varm[key] = source_adata.varm[key]
+                        print(f"    Added varm['{key}'] with shape {source_adata.varm[key].shape}")
+                    else:
+                        print(f"    Warning: varm['{key}'] has incompatible shape "
+                              f"{source_adata.varm[key].shape}, expected first dimension {self.adata.n_vars}")
+            else:
+                print("  No new varm keys to add.")
+        
+        print("Merge completed successfully!")
+        print(f"Final adata shape: {self.adata.shape}")
+        print(f"Final obs columns: {len(self.adata.obs.columns)}")
+        print(f"Final var columns: {len(self.adata.var.columns)}")
+        print(f"Final uns keys: {len(self.adata.uns.keys())}")
+        print(f"Final obsm keys: {len(self.adata.obsm.keys())}")
 
     # -------------------------------------------------------------------------
     # BLOCK 1: XGBoost Feature Restoration
@@ -535,18 +682,22 @@ class Postprocessing:
         normalized_df : pd.DataFrame
             The normalized enrichment matrix.
         """
-        cmat = pd.crosstab(parcellation1, parcellation2)
-        rows_to_keep = ~cmat.index.to_series().str.contains('|'.join(substrings), case=False, na=False)
-        cols_to_keep = ~cmat.columns.to_series().str.contains('|'.join(substrings), case=False, na=False)
-        cmat = cmat.loc[rows_to_keep, cols_to_keep]
+        cmat = pd.crosstab(self.adata.obs[parcellation1], self.adata.obs[parcellation2])
         normalized_df1 = cmat / cmat.sum()
         normalized_df1 = (normalized_df1.T / normalized_df1.T.mean()).T
-        cmat2 = pd.crosstab(parcellation1, parcellation2).T
+        cmat2 = pd.crosstab(self.adata.obs[parcellation1], self.adata.obs[parcellation2]).T
         normalized_df2 = cmat2 / cmat2.sum()
         normalized_df2 = (normalized_df2.T / normalized_df2.T.mean()).T
         normalized_df = normalized_df1 * normalized_df2
+
+        print("cmat")
+        print(cmat)
+        print("cmat2")
+        print(cmat2)
+
+        normalized_df[cmat < 20] = 0
         normalized_df[cmat2.T < 20] = 0
-        normalized_df = normalized_df.loc[:, normalized_df.sum() > M]
+        normalized_df = normalized_df.loc[normalized_df.sum(axis=1) > M, normalized_df.sum() > M]
         linkage_matrix = sch.linkage(sch.distance.pdist(normalized_df.T), method='weighted', optimal_ordering=True)
         order = sch.leaves_list(linkage_matrix)
         normalized_df = normalized_df.iloc[:, order]
@@ -560,7 +711,7 @@ class Postprocessing:
         plt.tick_params(axis='y', which='both', left=False, right=False)
         plt.tight_layout()
         plt.savefig(output_pdf)
-        plt.close()
+        plt.show()
         return normalized_df
 
     # -------------------------------------------------------------------------
@@ -674,7 +825,7 @@ class Postprocessing:
     # -------------------------------------------------------------------------
     # BLOCK 8a: UMAP of Molecules
     # -------------------------------------------------------------------------
-    def umap_molecules(self, centroidsmolecules, output_pdf="umap_molecules.pdf"):
+    def umap_molecules(self, output_pdf="umap_molecules.pdf", color_df=None):
         """
         Perform UMAP on a subset of user-defined molecules (observations as features).
         Plots labels using adjustText.
@@ -685,18 +836,43 @@ class Postprocessing:
             DataFrame with lipizone-wise averages (rows: lipizones; columns: molecules).
         output_pdf : str, optional
             Filename for the saved PDF plot.
+        color_df : pd.DataFrame, optional
+            DataFrame with lipids as index and a "color" column to color scatter points.
+            If None, all points will be colored gray.
         
         Returns
         -------
         umap_coords : np.ndarray
             UMAP coordinates.
         """
+
+        lipid_df = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var_names)
+        centroidsmolecules = lipid_df.groupby(self.adata.obs['lipizone_names']).mean()
+
         reducer = umap.UMAP(n_neighbors=5, min_dist=0.05, n_jobs=1)
         umap_result = reducer.fit_transform(centroidsmolecules.T)
         fig, ax = plt.subplots(figsize=(14, 10))
         texts = []
+        
+        # Determine colors for scatter points
+        if color_df is not None and 'color' in color_df.columns:
+            # Get colors for molecules that are present in both datasets
+            colors = []
+            for molecule in centroidsmolecules.columns:
+                if molecule in color_df.index:
+                    color_value = color_df.loc[molecule, 'color']
+                    # Handle NaN values by replacing with gray
+                    if pd.isna(color_value):
+                        colors.append("gray")
+                    else:
+                        colors.append(color_value)
+                else:
+                    colors.append("gray")  # Default color for molecules not in color_df
+        else:
+            colors = "gray"
+        
         scatter = ax.scatter(umap_result[:, 0], umap_result[:, 1],
-                             c="gray", edgecolor="w", linewidth=0.5)
+                             c=colors, edgecolor="w", linewidth=0.5)
         for i, txt in enumerate(centroidsmolecules.columns):
             texts.append(ax.text(umap_result[i, 0], umap_result[i, 1], txt,
                                  fontsize=10, alpha=0.9))
@@ -707,33 +883,58 @@ class Postprocessing:
         ax.set_xticks([]); ax.set_yticks([])
         plt.tight_layout()
         plt.savefig(output_pdf)
-        plt.close()
+        plt.show()
         return umap_result
 
     # -------------------------------------------------------------------------
     # BLOCK 8b: UMAP of Lipizones
     # -------------------------------------------------------------------------
-    def umap_lipizones(self, centroids, n_neighbors=4, min_dist=0.05):
+    def tsne_lipizones(self, perplexity=30, n_iter=1000):
         """
-        Perform UMAP on lipizone centroids.
+        Perform t-SNE on lipizone centroids.
         
         Parameters
         ----------
         centroids : pd.DataFrame
             DataFrame of lipizone centroids.
-        n_neighbors : int, optional
-            UMAP parameter.
-        min_dist : float, optional
-            UMAP parameter.
+        perplexity : float, optional
+            t-SNE parameter.
+        n_iter : int, optional
+            Number of iterations for t-SNE.
         
         Returns
         -------
-        umap_coords : np.ndarray
-            UMAP coordinates.
+        tsne_coords : np.ndarray
+            t-SNE coordinates.
         """
-        reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_jobs=1)
-        umap_coords = reducer.fit_transform(centroids)
-        return umap_coords
+
+        lipid_df = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var_names)
+        centroids = lipid_df.groupby(self.adata.obs['lipizone_names']).mean()
+
+        from sklearn.manifold import TSNE
+        reducer = TSNE(perplexity=perplexity, n_iter=n_iter, random_state=42)
+        tsne_coords = reducer.fit_transform(centroids)
+        
+        # Create scatter plot colored by lipizone_color
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Create mapping from lipizone names to colors
+        lipizone_color_map = self.adata.obs.groupby('lipizone_names')['lipizone_color'].first()
+        
+        # Get colors for each centroid (in the same order as centroids.index)
+        centroid_colors = [lipizone_color_map[lipizone_name] for lipizone_name in centroids.index]
+        
+        # Create scatter plot
+        scatter = ax.scatter(tsne_coords[:, 0], tsne_coords[:, 1], 
+                           c=centroid_colors, alpha=0.7, s=50)
+        
+        ax.set_xlabel('t-SNE 1')
+        ax.set_ylabel('t-SNE 2')
+        ax.set_title('t-SNE of Lipizones colored by lipizone_color')
+        plt.tight_layout()
+        plt.show()
+        
+        return tsne_coords
 
     # -------------------------------------------------------------------------
     # BLOCK 9: Spatial Modules by Anatomical Colocalization
@@ -756,8 +957,8 @@ class Postprocessing:
         """
         # Filter adata.obs (or provided data) by section or anatomical acronym
         focus = self.adata.obs.copy()
-        if "Section" in focus.columns:
-            focus = focus[focus["Section"].isin(selected_sections)]
+        if "SectionID" in focus.columns:
+            focus = focus[focus["SectionID"].isin(selected_sections)]
         if "acronym" in focus.columns:
             focus = focus[(focus["acronym"].str.endswith(LA, na=False)) | (focus["acronym"].str.endswith(LB, na=False))]
         # Keep only abundant lipizones
@@ -779,14 +980,116 @@ class Postprocessing:
         cluster_labels = ad.obs['leiden']
         focus["leiden_cluster"] = focus["lipizone_color"].map(cluster_labels.to_dict())
         unique_clusters = sorted(focus["leiden_cluster"].unique())
-        # Plot groups
+        
+        # Plot groups - fix the empty plotting issue
         for cluster in unique_clusters:
-            fig, axs = plt.subplots(1, 3, figsize=(18, 6))
-            for ax in axs:
+            # Filter data for this specific cluster
+            cluster_data = focus[focus["leiden_cluster"] == cluster]
+            
+            if cluster_data.empty:
+                print(f"No data found for cluster {cluster}")
+                continue
+                
+            # Get unique sections for this cluster
+            sections_in_cluster = cluster_data["SectionID"].unique() if "SectionID" in cluster_data.columns else [None]
+            
+            # Create subplots (adjust number based on actual sections)
+            n_sections = min(len(sections_in_cluster), 3)  # Max 3 plots per row
+            if n_sections == 0:
+                continue
+                
+            fig, axs = plt.subplots(1, n_sections, figsize=(6*n_sections, 6))
+            if n_sections == 1:
+                axs = [axs]  # Make it iterable
+            
+            for i, section in enumerate(sections_in_cluster[:n_sections]):
+                ax = axs[i]
+                
+                # Filter data for this section
+                if section is not None:
+                    section_data = cluster_data[cluster_data["SectionID"] == section]
+                    section_title = f"Section {section}"
+                    # Get all data for this section for background
+                    background_data = self.adata.obs[self.adata.obs["SectionID"] == section] if "SectionID" in self.adata.obs.columns else self.adata.obs
+                else:
+                    section_data = cluster_data
+                    section_title = "All sections"
+                    background_data = self.adata.obs
+                
+                if section_data.empty:
+                    ax.text(0.5, 0.5, f"No data\nfor {section_title}", 
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_aspect("equal")
+                    ax.axis("off")
+                    continue
+                
+                # Get spatial coordinates - try different column names
+                x_col, y_col = None, None
+                for x_name in ['x', 'z_index', 'zccf', 'xccf']:
+                    if x_name in section_data.columns:
+                        x_col = x_name
+                        break
+                for y_name in ['y', 'y_index', 'yccf']:
+                    if y_name in section_data.columns:
+                        y_col = y_name
+                        break
+                
+                if x_col is None or y_col is None:
+                    ax.text(0.5, 0.5, f"No spatial\ncoordinates found", 
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_aspect("equal")
+                    ax.axis("off")
+                    continue
+                
+                # Plot background: entire section in grayscale based on lipizone_names
+                if "lipizone_names" in background_data.columns and not background_data.empty:
+                    # Create a mapping from lipizone_names to gray values
+                    unique_lipizone_names = background_data["lipizone_names"].unique()
+                    unique_lipizone_names = unique_lipizone_names[pd.notna(unique_lipizone_names)]  # Remove NaN values
+                    
+                    if len(unique_lipizone_names) > 0:
+                        # Create grayscale colormap - distribute gray values evenly
+                        gray_values = np.linspace(0.2, 0.8, len(unique_lipizone_names))  # Avoid pure black/white
+                        lipizone_to_gray = dict(zip(unique_lipizone_names, gray_values))
+                        
+                        # Map each point to its gray value
+                        background_colors = background_data["lipizone_names"].map(lipizone_to_gray)
+                        
+                        # Plot background points
+                        valid_background = background_data.dropna(subset=[x_col, y_col, "lipizone_names"])
+                        if not valid_background.empty:
+                            ax.scatter(
+                                valid_background[y_col], 
+                                valid_background[x_col], 
+                                c=background_colors[valid_background.index], 
+                                cmap='gray',
+                                s=0.5, 
+                                alpha=0.3,
+                                rasterized=True
+                            )
+                
+                # Plot the spatial data colored by lipizone_color (foreground)
+                scatter = ax.scatter(
+                    section_data[y_col], 
+                    section_data[x_col], 
+                    c=section_data["lipizone_color"], 
+                    s=2, 
+                    alpha=0.8,
+                    rasterized=True,
+                    edgecolors='black',
+                    linewidth=0.1
+                )
+                
                 ax.set_aspect("equal")
                 ax.axis("off")
+                ax.set_title(section_title)
+                # Invert y-axis if needed (common for image coordinates)
+                ax.invert_yaxis()
+            
             plt.suptitle(f"Spatial module: {cluster}")
+            plt.tight_layout()
             plt.show()
+        
         return None
 
     def add_lipid_programs_from_parquet(self, parquet_file: str) -> None:
