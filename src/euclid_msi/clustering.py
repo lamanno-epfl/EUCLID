@@ -1014,15 +1014,13 @@ class Clustering:
     # -------------------------------------------------------------------------
     def assign_cluster_colors(self, tree):
         """
-        Compute a color assignment for lipizones (clusters) based on spatial distribution.
+        Compute a color assignment for lipizones (clusters) based on the hierarchy of splits.
         
         Parameters
         ----------
         tree : pd.DataFrame
             A DataFrame that contains the clustering hierarchy (e.g. split history).
-        coordinates : pd.DataFrame
-            Spatial coordinates with columns including 'zccf','yccf','Section'.
-        
+
         Returns
         -------
         lipizone_colors : pd.Series
@@ -1142,7 +1140,7 @@ class Clustering:
     # -------------------------------------------------------------------------
     # BLOCK 5: Assign a name to each cluster based on anatomical localization.
     # -------------------------------------------------------------------------
-    def name_lipizones_anatomy(self, acronyms, lipizones):
+    def name_lipizones_anatomy(self, acronym_column, lipizone_column):
         """
         Assign anatomical names to clusters based on the cross-tabulation of acronyms and lipizone labels.
         
@@ -1158,6 +1156,8 @@ class Clustering:
         mapping_df : pd.DataFrame
             A mapping (and heatmap) of anatomical enrichment per lipizone.
         """
+        acronyms = self.adata.obs[acronym_column]
+        lipizones = self.adata.obs[lipizone_column]
         acronyms = acronyms[acronyms.isin(acronyms.value_counts().index[acronyms.value_counts() > 50])]
         lipizones = lipizones.loc[acronyms.index]
         cmat = pd.crosstab(acronyms, lipizones)
@@ -1178,23 +1178,53 @@ class Clustering:
         # Plot heatmap (save to PDF)
         plt.figure(figsize=(10, 10))
         import seaborn as sns
-        sns.heatmap(normalized_df, cmap="Purples", cbar_kws={'label': 'Enrichment'},
+        sns.heatmap(normalized_df, cmap="Grays", cbar_kws={'label': 'Enrichment'},
                     xticklabels=True, yticklabels=False,
                     vmin=np.percentile(normalized_df, 2), vmax=np.percentile(normalized_df, 98))
         plt.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)
         plt.tick_params(axis='y', which='both', left=False, right=False)
         plt.tight_layout()
-        plt.savefig("purpleheatmap_acronymlipizones.pdf")
-        plt.close()
-        mapping = normalized_df.T
-        new_index = [f"{row[:4]}" for row in mapping.index]  # placeholder transformation
-        mat = pd.DataFrame({"oldname": mapping.index, "acronym": new_index})
-        return mat
+        plt.show()
+        
+        # Create lipizone names based on enriched acronyms
+        lipizone_names = {}
+        for lipizone in normalized_df.columns:
+            # Find acronyms with enrichment > 300 for this lipizone
+            enriched_acronyms = normalized_df[normalized_df[lipizone] > 300].index.tolist()
+            # Concatenate with "-" separator, or use "Broad" if no enriched acronyms
+            if enriched_acronyms:
+                lipizone_name = "-".join(enriched_acronyms)
+            else:
+                lipizone_name = "Broad"
+            lipizone_names[lipizone] = lipizone_name
+        
+        # Handle duplicate names by adding suffixes
+        name_counts = {}
+        unique_lipizone_names = {}
+        
+        for lipizone, name in lipizone_names.items():
+            if name in name_counts:
+                name_counts[name] += 1
+                unique_name = f"{name}_{name_counts[name]}"
+            else:
+                name_counts[name] = 0
+                unique_name = name
+            unique_lipizone_names[lipizone] = unique_name
+        
+        # Add lipizone names to adata.obs
+        # First initialize the column
+        self.adata.obs['lipizone_names'] = "Unassigned"
+        
+        # Map the lipizone values to their names
+        lipizone_series = self.adata.obs[lipizone_column]
+        for lipizone_value, name in unique_lipizone_names.items():
+            mask = lipizone_series == lipizone_value
+            self.adata.obs.loc[mask, 'lipizone_names'] = name
 
     # -------------------------------------------------------------------------
     # BLOCK 6: Plot each cluster to separate PDF files for inspection.
     # -------------------------------------------------------------------------
-    def clusters_to_pdf(self, lipizone_names, output_folder="lipizones_output", pdf_filename="clusters_combined.pdf"):
+    def clusters_to_pdf(self, output_folder="lipizones_output", pdf_filename="clusters_combined.pdf"):
         """
         Plot each cluster (lipizone) separately into PDF files.
         
@@ -1208,32 +1238,33 @@ class Clustering:
             Final merged PDF filename.
         """
         os.makedirs(output_folder, exist_ok=True)
-        # Combine coordinates with lipizone names.
-        levels = pd.concat([self.coordinates.loc[self.reconstructed_data_df.index],
-                            self.adata.obs], axis=1)
-        levels['lipizone_names'] = lipizone_names
-        levels['Section'] = self.coordinates['Section']
-        levels['zccf'] = self.coordinates['zccf']
-        levels['yccf'] = self.coordinates['yccf']
-        levels['xccf'] = self.coordinates['xccf']
+        # Extract coordinate and lipizone information from adata.obs
+        # Get the subset of adata.obs corresponding to reconstructed_data_df
+        levels = self.adata.obs.loc[self.reconstructed_data_df.index].copy()
+        
+        # Ensure we have the necessary columns
+        required_cols = ['SectionID', 'xccf', 'yccf', 'zccf', 'lipizone_names']
+        for col in required_cols:
+            if col not in levels.columns:
+                raise KeyError(f"Required column '{col}' not found in adata.obs. Available columns: {list(levels.columns)}")
         dot_size = 0.3
-        sections_to_plot = range(1, 33)
-        global_min_z = levels['xccf'].min()
-        global_max_z = levels['xccf'].max()
+        sections_to_plot = levels['SectionID'].unique()
+        global_min_z = levels['zccf'].min()
+        global_max_z = levels['zccf'].max()
         global_min_y = -levels['yccf'].max()
         global_max_y = -levels['yccf'].min()
         unique_names = np.sort(levels['lipizone_names'].unique())
         # Plot each cluster to its own PDF
-        for uniq in unique_names:
+        for uniq in tqdm(unique_names):
             fig, axes = plt.subplots(4, 8, figsize=(40, 20))
             axes = axes.flatten()
             for i, sec in enumerate(sections_to_plot):
                 ax = axes[i]
-                subset = levels[levels["Section"] == sec]
-                ax.scatter(subset['xccf'], -subset['yccf'], c=subset['lipizone_names'].astype("category").cat.codes,
+                subset = levels[levels["SectionID"] == sec]
+                ax.scatter(subset['zccf'], -subset['yccf'], c=subset['lipizone_names'].astype("category").cat.codes,
                            cmap='Greys', s=dot_size*2, alpha=0.2, rasterized=True)
                 highlight = subset[subset['lipizone_names'] == uniq]
-                ax.scatter(highlight['xccf'], -highlight['yccf'], c='red', s=dot_size, alpha=1, rasterized=True)
+                ax.scatter(highlight['zccf'], -highlight['yccf'], c='red', s=dot_size, alpha=1, rasterized=True)
                 ax.axis('off')
                 ax.set_aspect('equal')
                 ax.set_xlim(global_min_z, global_max_z)
@@ -1256,7 +1287,7 @@ class Clustering:
         merger.close()
         print(f"Merged PDF saved as {final_pdf}")
 
-    def compare_leiden_lipizone(self, leiden_key="X_Leiden2", lipizone_key="lipizone", output_file=None):
+    def compare_leiden_lipizone(self, leiden_key="X_Leiden", lipizone_key="lipizone", output_file=None):
         """
         Compare Leiden clustering results with lipizone annotations.
         
@@ -1276,6 +1307,10 @@ class Clustering:
             Leiden clusters and lipizones
         """
         # Create contingency matrix
+
+        print(self.adata.obs[leiden_key])
+        print(self.adata.obs[lipizone_key])
+
         cm = pd.crosstab(self.adata.obs[leiden_key], self.adata.obs[lipizone_key])
         
         # Calculate fractions
@@ -1309,3 +1344,136 @@ class Clustering:
             plt.show()
             
         return df
+
+    def add_clustering_to_adata(self, clusteringLOG):
+        """
+        Add clustering results from clusteringLOG DataFrame to AnnData object.
+        
+        Parameters
+        ----------
+        clusteringLOG : pd.DataFrame
+            DataFrame containing clustering results with columns for each level.
+        adata : sc.AnnData
+            AnnData object to add the clustering results to.
+            
+        Returns
+        -------
+        sc.AnnData
+            The AnnData object with added clustering results in obs.
+        """
+        # Ensure the index of clusteringLOG matches the observations in adata
+        if not all(idx in self.adata.obs_names for idx in clusteringLOG.index):
+            raise ValueError("Some indices in clusteringLOG are not present in adata.obs_names")
+            
+        # Get all level columns
+        level_cols = [col for col in clusteringLOG.columns if col.startswith('level_')]
+        
+        # Add each level to adata.obs
+        for col in level_cols:
+            self.adata.obs[col] = np.nan
+            self.adata.obs.loc[clusteringLOG.index, col] = clusteringLOG[col].values
+            
+        # Compute class, lipizone, and cluster
+        # First ensure all level columns exist
+        required_levels = ['level_1', 'level_2', 'level_3', 'level_4', 'level_5', 'level_6']
+        for level in required_levels:
+            if level not in clusteringLOG.columns:
+                clusteringLOG[level] = np.nan
+                
+        # Compute class (first 3 levels)
+        clusteringLOG['class'] = clusteringLOG['level_1'].astype(str) + \
+                                clusteringLOG['level_2'].astype(str) + \
+                                clusteringLOG['level_3'].astype(str)
+                                
+        # Compute lipizone (all 6 levels)
+        clusteringLOG['lipizone'] = clusteringLOG['level_1'].astype(str) + \
+                                   clusteringLOG['level_2'].astype(str) + \
+                                   clusteringLOG['level_3'].astype(str) + \
+                                   clusteringLOG['level_4'].astype(str) + \
+                                   clusteringLOG['level_5'].astype(str) + \
+                                   clusteringLOG['level_6'].astype(str)
+                                   
+        # Set cluster equal to lipizone
+        clusteringLOG['cluster'] = clusteringLOG['lipizone']
+        
+        # Add computed columns to adata.obs
+        for col in ['class', 'lipizone', 'cluster']:
+            self.adata.obs[col] = np.nan
+            self.adata.obs.loc[clusteringLOG.index, col] = clusteringLOG[col].values
+
+    # -------------------------------------------------------------------------
+    # BLOCK 7: Basic plotting functions for lipizone analysis
+    # -------------------------------------------------------------------------
+    def plot_distribution_of_pixels_per_lipizone(self, figsize=(12, 6)):
+        """
+        Plot the distribution of number of pixels per lipizone as a histogram.
+        
+        Parameters
+        ----------
+        figsize : tuple, optional
+            Figure size (width, height). Default is (12, 6).
+        """
+        # Count pixels per lipizone
+        pixel_counts = self.adata.obs['lipizone_names'].value_counts()
+
+        # Histogram of pixel counts
+        plt.figure(figsize=figsize)
+        plt.hist(pixel_counts.values, bins=20, alpha=0.7, edgecolor='black')
+        plt.xlabel('Number of Pixels')
+        plt.ylabel('Frequency')
+        plt.title('Distribution of Pixel Counts per Lipizone')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+    def plot_histogram_of_lipids_per_lipizone(self, thr1=0.8, thr2=0.0001, figsize=(10, 6)):
+        """
+        Plot histogram of the number of lipids per lipizone using threshold criteria.
+        A lipid is considered present in a lipizone if > thr1 fraction of its pixels have intensity > thr2.
+        
+        Parameters
+        ----------
+        thr1 : float, optional
+            Proportion threshold (0 < thr1 <= 1). Default is 0.8.
+        thr2 : float, optional
+            Intensity threshold to count a lipid as present in a pixel. Default is 0.0001.
+        figsize : tuple, optional
+            Figure size (width, height). Default is (10, 6).
+        """
+        import numpy as np
+        import pandas as pd
+
+        # Extract the lipid data as a DataFrame
+        lipid_data = pd.DataFrame(self.adata.X, 
+                                index=self.adata.obs_names, 
+                                columns=self.adata.var_names)
+        lipid_data['lipizone_names'] = self.adata.obs['lipizone_names']
+
+        lipids_count_per_zone = []
+
+        # Loop over each lipizone (skip 'Unassigned')
+        for lipizone in self.adata.obs['lipizone_names'].unique():
+            if lipizone == 'Unassigned':
+                continue
+
+            # Subset to pixels in this lipizone
+            mask = lipid_data['lipizone_names'] == lipizone
+            sub_df = lipid_data.loc[mask, self.adata.var_names]
+
+            # For each lipid (column), compute fraction of pixels above thr2
+            # Count the number of lipids meeting the > thr1 criterion
+            frac_above = (sub_df > thr2).sum(axis=0) / sub_df.shape[0]
+            n_lipids = (frac_above > thr1).sum()
+            lipids_count_per_zone.append(n_lipids)
+
+        # Plot histogram of lipid counts per lipizone
+        plt.figure(figsize=figsize)
+        plt.hist(lipids_count_per_zone, bins=20, alpha=0.7, edgecolor='black')
+        plt.xlabel('Number of Lipids per Lipizone')
+        plt.ylabel('Frequency')
+        plt.title('Distribution of Lipid Counts per Lipizone')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
