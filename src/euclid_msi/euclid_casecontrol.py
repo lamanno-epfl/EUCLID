@@ -1173,7 +1173,7 @@ class CaseControlAnalysis:
     A class for case-control analysis on spatial lipidomics data.
     """
     
-    def __init__(self, adata: sc.AnnData):
+    def __init__(self, adata: sc.AnnData, analysis_name="analysis"):
         """
         Initialize with an AnnData object containing spatial lipidomics data.
         
@@ -1181,8 +1181,11 @@ class CaseControlAnalysis:
         ----------
         adata : sc.AnnData
             AnnData object with spatial lipidomics data
+        analysis_name : str, optional
+            Prefix for all output files. Default is "analysis".
         """
         self.adata = adata
+        self.analysis_name = analysis_name
     
     def run_case_control_analysis(
         self,
@@ -1244,6 +1247,8 @@ class CaseControlAnalysis:
         # Patch global config reference if needed
         global CASECONTROL_DIR
         global PDF_DIR
+        CASECONTROL_DIR = Path(os.getcwd()) / f"{self.analysis_name}_casecontrol_analysis"
+        CASECONTROL_DIR.mkdir(exist_ok=True)
         PDF_DIR = CASECONTROL_DIR
         # Run main analysis
         results = main(df, coords, config)
@@ -1438,7 +1443,7 @@ class CaseControlAnalysis:
         todrop_lipids=None,
         k_row=16,
         thresh=0.5,
-        output_filename="overview_pregnancy_shifts.pdf",
+        output_filename=None,
         figsize=(16, 10)
     ):
         """
@@ -1451,6 +1456,8 @@ class CaseControlAnalysis:
         - Lipid class colors (top)
         - Nonzero count bar plot (right)
         """
+        if output_filename is None:
+            output_filename = f"{self.analysis_name}_overview_pregnancy_shifts.pdf"
         
         # Calculate log2 fold changes
         shifts = np.log2((shift + baseline) / baseline).fillna(0)
@@ -1652,7 +1659,7 @@ class CaseControlAnalysis:
             'Color': Linkage_colors
         })
         
-        color_df.to_csv("color_df_pregnancy.csv")
+        color_df.to_csv(f"{self.analysis_name}_color_df_pregnancy.csv")
         metadata['cluster_variation'] = metadata[supertype_col].map(clusters_series).fillna("lightgray")
         color_df.index = color_df['Linkage Cluster']
         metadata['cluster_variation_color'] = metadata['cluster_variation'].map(color_df['Color'])
@@ -1686,7 +1693,7 @@ class CaseControlAnalysis:
                 ax.set_title(f'Sample {sample}, Section {section}', fontsize=8)
         
         plt.tight_layout(rect=[0, 0, 0.9, 1])
-        plt.savefig("comodulation_clusters.pdf")
+        plt.savefig(f"{self.analysis_name}_comodulation_clusters.pdf")
         plt.show()
         
         # Add comodulation clusters to adata.obs
@@ -1780,7 +1787,7 @@ class CaseControlAnalysis:
         palette=None,
         max_width=5,
         figsize_per_plot=(3, 3),
-        output_filename="comodclusters.pdf"
+        output_filename=None
     ):
         """
         Draw one thumbnail per cluster:
@@ -1809,8 +1816,10 @@ class CaseControlAnalysis:
         figsize_per_plot : tuple
             Size (w,h) of each thumbnail; total fig size calculated based on grid.
         output_filename : str
-            Output filename for the saved plot.
+            Output filename for the saved plot. If None, uses analysis_name prefix.
         """
+        if output_filename is None:
+            output_filename = f"{self.analysis_name}_comodclusters.pdf"
         # 1. Find common lipids & build graph
         common = set.intersection(*(set(df.index) for df in modulation_scores.values()))
         common_lipids = [L for L in metabolicmodule.index if L in common]
@@ -1999,37 +2008,3 @@ def generate_distinct_colors(n):
         return plt.cm.tab20(np.linspace(0, 1, min(n, 20)))
     hues = np.linspace(0, 1, n, endpoint=False)
     return [plt.cm.hsv(h) for h in hues]
-
-
-# === Backward compatibility wrapper functions ===
-
-def run_case_control_analysis(adata, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.run_case_control_analysis(**kwargs)
-
-def summarize_case_control_results(adata, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.summarize_case_control_results(**kwargs)
-
-def summarize_xsupertypes(adata, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.summarize_xsupertypes(**kwargs)
-
-def plot_comodulation_heatmap(adata, shift, baseline, expressed, shifted, ddf, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.plot_comodulation_heatmap(shift, baseline, expressed, shifted, ddf, **kwargs)
-
-def compute_edge_modulation_scores(adata, foldchanges, metabolicmodule, comodulation_clusters, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.compute_edge_modulation_scores(foldchanges, metabolicmodule, comodulation_clusters, **kwargs)
-
-def plot_modulation_thumbnails(adata, modulation_scores, metabolicmodule, ddf, **kwargs):
-    """Backward compatibility wrapper for the class-based API."""
-    cc = CaseControlAnalysis(adata)
-    return cc.plot_modulation_thumbnails(modulation_scores, metabolicmodule, ddf, **kwargs)
-

@@ -110,7 +110,7 @@ class Postprocessing:
     
     Operates on the AnnData object (and related data) produced by the embedding pipeline.
     """
-    def __init__(self, emb, morans, 
+    def __init__(self, emb, morans, analysis_name="analysis",
                  reference_image=None, annotation_image=None):
         """
         Parameters
@@ -121,6 +121,8 @@ class Postprocessing:
             The harmonized NMF embeddings (or similar) stored as a DataFrame.
         morans : pd.DataFrame
             DataFrame with Moran's I values (features x sections).
+        analysis_name : str, optional
+            Prefix for all output files. Default is "analysis".
         alldata : pd.DataFrame
             The full raw data (e.g. from uMAIA) with columns corresponding to features.
         pixels : pd.DataFrame
@@ -132,6 +134,7 @@ class Postprocessing:
         annotation_image : np.ndarray, optional
             3D anatomical annotation image.
         """
+        self.analysis_name = analysis_name
         if emb is None:
             self.adata = None
 
@@ -154,39 +157,43 @@ class Postprocessing:
 
     def save_msi_dataset(
         self,
-        filename="msi_dataset_postprocessing_ops.h5ad"):
+        filename=None):
         """
         Save the current AnnData object to disk, including any postprocessing results.
 
         Parameters
         ----------
         filename : str, optional
-            File path to save the AnnData object.
+            File path to save the AnnData object. If None, uses analysis_name prefix.
         save_embeddings : bool, optional
             Whether to save the harmonized embeddings in the AnnData object.
         save_restored_features : bool, optional
             Whether to save any restored features from XGBoost imputation.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_msi_dataset_postprocessing_ops.h5ad"
         # Create a copy of the AnnData object to avoid modifying the original
         adata_to_save = self.adata.copy()
         
         # Save the AnnData object
         adata_to_save.write_h5ad(filename)
 
-    def load_msi_dataset(self, filename="msi_dataset_postprocessing_ops.h5ad"):
+    def load_msi_dataset(self, filename=None):
         """
         Load an AnnData object from disk.
 
         Parameters
         ----------
         filename : str, optional
-            File path from which to load the AnnData object.
+            File path from which to load the AnnData object. If None, uses analysis_name prefix.
 
         Returns
         -------
         sc.AnnData
             The loaded AnnData object.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_msi_dataset_postprocessing_ops.h5ad"
         adata = sc.read_h5ad(filename)
         self.adata = adata
 
@@ -332,8 +339,8 @@ class Postprocessing:
         train_section_indices=(0, 2),
         val_section_index=1,
         valid_pearson_threshold=0.4,
-        output_model_dir="xgbmodels",
-        metrics_csv="metrics_imputation_df.csv",
+        output_model_dir=None,
+        metrics_csv=None,
         xgb_params=None
     ):
         import os
@@ -396,6 +403,10 @@ class Postprocessing:
         anndata.AnnData
             Updated main AnnData object with the restored lipids added in .obsm.
         """
+        if output_model_dir is None:
+            output_model_dir = f"{self.analysis_name}_xgbmodels"
+        if metrics_csv is None:
+            metrics_csv = f"{self.analysis_name}_metrics_imputation_df.csv"
         os.makedirs(output_model_dir, exist_ok=True)
 
         self.embeddings = pd.DataFrame(self.embeddings, index=self.pixels.index)
@@ -540,7 +551,7 @@ class Postprocessing:
     # -------------------------------------------------------------------------
     # BLOCK 2: Anatomical Interpolation
     # -------------------------------------------------------------------------
-    def anatomical_interpolation(self, lipids, output_dir="3d_interpolated_native", w=50):
+    def anatomical_interpolation(self, lipids, output_dir=None, w=50):
         """
         For each lipid (by name) in the given list, perform 3D anatomical interpolation.
         Uses the provided reference_image and annotation_image.
@@ -551,10 +562,12 @@ class Postprocessing:
         lipids : list
             List of lipid names (features) to interpolate.
         output_dir : str, optional
-            Directory to save interpolation outputs.
+            Directory to save interpolation outputs. If None, uses analysis_name prefix.
         w : int, optional
             Threshold value used for cleaning.
         """
+        if output_dir is None:
+            output_dir = f"{self.analysis_name}_3d_interpolated_native"
         os.makedirs(output_dir, exist_ok=True)
         
         # Get lipid data from X
@@ -660,7 +673,7 @@ class Postprocessing:
     # -------------------------------------------------------------------------
     # BLOCK 5: Compare Parcellations
     # -------------------------------------------------------------------------
-    def compare_parcellations(self, parcellation1, parcellation2, substrings=[], M=200, output_pdf="purpleheatmap_acronymlipizones.pdf"):
+    def compare_parcellations(self, parcellation1, parcellation2, substrings=[], M=200, output_pdf=None):
         """
         Compare two parcellations (e.g. lipizones vs. cell types) via crosstab and heatmap.
         
@@ -675,13 +688,15 @@ class Postprocessing:
         M : int, optional
             Minimum total counts threshold.
         output_pdf : str, optional
-            Filename for saving the heatmap.
+            Filename for saving the heatmap. If None, uses analysis_name prefix.
         
         Returns
         -------
         normalized_df : pd.DataFrame
             The normalized enrichment matrix.
         """
+        if output_pdf is None:
+            output_pdf = f"{self.analysis_name}_purpleheatmap_acronymlipizones.pdf"
         cmat = pd.crosstab(self.adata.obs[parcellation1], self.adata.obs[parcellation2])
         normalized_df1 = cmat / cmat.sum()
         normalized_df1 = (normalized_df1.T / normalized_df1.T.mean()).T
@@ -767,10 +782,10 @@ class Postprocessing:
                                       columns=[f"Factor_{i+1}" for i in range(fac.shape[1])])
         factors_df = pd.DataFrame(fac, index=gexpr.index,
                                   columns=[f"Factor_{i+1}" for i in range(fac.shape[1])])
-        factors_df.to_csv("minimofa_factors.csv")
-        weights_gene.to_csv("minimofa_weights_genes.csv")
-        weights_lipid.to_csv("minimofa_weights_lipids.csv")
-        factors_df.to_hdf("factors_dfMOFA.h5ad", key="table")
+        factors_df.to_csv(f"{self.analysis_name}_minimofa_factors.csv")
+        weights_gene.to_csv(f"{self.analysis_name}_minimofa_weights_genes.csv")
+        weights_lipid.to_csv(f"{self.analysis_name}_minimofa_weights_lipids.csv")
+        factors_df.to_hdf(f"{self.analysis_name}_factors_dfMOFA.h5ad", key="table")
         # tSNE on MOFA factors
         scaler = StandardScaler()
         x_train = scaler.fit_transform(factors_df)
@@ -782,7 +797,7 @@ class Postprocessing:
         tsne_emb_1 = tsne_emb.optimize(n_iter=500, exaggeration=1.2)
         tsne_emb_final = tsne_emb_1.optimize(n_iter=100, exaggeration=2.5)
         tsne_coords = pd.DataFrame(tsne_emb_final.view(np.ndarray), index=factors_df.index, columns=["TSNE1", "TSNE2"])
-        np.save("minimofageneslipidsembedding_train_N.npy", tsne_coords.values)
+        np.save(f"{self.analysis_name}_minimofageneslipidsembedding_train_N.npy", tsne_coords.values)
         return {"factors": factors_df, "weights_gene": weights_gene, "weights_lipid": weights_lipid, "tsne": tsne_coords}
 
     # -------------------------------------------------------------------------
@@ -825,7 +840,7 @@ class Postprocessing:
     # -------------------------------------------------------------------------
     # BLOCK 8a: UMAP of Molecules
     # -------------------------------------------------------------------------
-    def umap_molecules(self, output_pdf="umap_molecules.pdf", color_df=None):
+    def umap_molecules(self, output_pdf=None, color_df=None):
         """
         Perform UMAP on a subset of user-defined molecules (observations as features).
         Plots labels using adjustText.
@@ -835,7 +850,7 @@ class Postprocessing:
         centroidsmolecules : pd.DataFrame
             DataFrame with lipizone-wise averages (rows: lipizones; columns: molecules).
         output_pdf : str, optional
-            Filename for the saved PDF plot.
+            Filename for the saved PDF plot. If None, uses analysis_name prefix.
         color_df : pd.DataFrame, optional
             DataFrame with lipids as index and a "color" column to color scatter points.
             If None, all points will be colored gray.
@@ -845,6 +860,8 @@ class Postprocessing:
         umap_coords : np.ndarray
             UMAP coordinates.
         """
+        if output_pdf is None:
+            output_pdf = f"{self.analysis_name}_umap_molecules.pdf"
 
         lipid_df = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var_names)
         centroidsmolecules = lipid_df.groupby(self.adata.obs['lipizone_names']).mean()
@@ -1309,7 +1326,7 @@ class Postprocessing:
         print(f"Created X_lipidome with shape {X_lipidome.shape}")
         print(f"Added {len(valid_names)} new lipid features from restored data")
 
-    def plot_all_annotated_lipids(self, final_table, output_dir="all_annotated_lipids"):
+    def plot_all_annotated_lipids(self, final_table, output_dir=None):
         """
         Create individual PDF plots for each lipid in X_lipidome, showing their spatial distribution
         and metadata including name, source (X or X_restored), m/z value, and quality scores.
@@ -1319,7 +1336,7 @@ class Postprocessing:
         final_table : pd.DataFrame
             DataFrame containing lipid annotations and scores
         output_dir : str, optional
-            Directory to save the PDF plots (default: "all_annotated_lipids")
+            Directory to save the PDF plots. If None, uses analysis_name prefix.
         """
         import os
         import matplotlib.pyplot as plt
@@ -1329,6 +1346,8 @@ class Postprocessing:
         import math
         from tqdm import tqdm
         
+        if output_dir is None:
+            output_dir = f"{self.analysis_name}_all_annotated_lipids"
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         

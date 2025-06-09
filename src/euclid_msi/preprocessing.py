@@ -21,15 +21,32 @@ class Preprocessing:
     """
     A class encapsulating all preprocessing steps (Blocks 1-9) for MSI data.
     Each method corresponds to a specific BLOCK in the original snippets.
+    
+    Parameters
+    ----------
+    analysis_name : str, optional
+        Prefix for all output files. Default is "analysis".
     """
+    
+    def __init__(self, analysis_name="analysis"):
+        """
+        Initialize the Preprocessing class.
+        
+        Parameters
+        ----------
+        analysis_name : str, optional
+            Prefix for all output files. Default is "analysis".
+        """
+        self.analysis_name = analysis_name
+        self.adata = None
 
     def calculate_moran(
         self,
         path_data,
         acquisitions,
         n_molecules=5000000,
-        log_file="iterations_log.txt",
-        morans_csv="morans_by_sec.csv"
+        log_file=None,
+        morans_csv=None
     ):
         """
         Calculate and store Moran's I for each feature and each section.
@@ -41,15 +58,22 @@ class Preprocessing:
         acquisitions : list of str, optional
             List of acquisitions/sections to process.
         log_file : str, optional
-            Path to the file where iteration logs are appended.
+            Path to the file where iteration logs are appended. 
+            If None, defaults to "{analysis_name}_iterations_log.txt".
         morans_csv : str, optional
             Path to the CSV file where Moran's I results are saved.
+            If None, defaults to "{analysis_name}_morans_by_sec.csv".
 
         Returns
         -------
         pd.DataFrame
             DataFrame (feature x acquisition) containing Moran's I values.
         """
+        
+        if log_file is None:
+            log_file = f"{self.analysis_name}_iterations_log.txt"
+        if morans_csv is None:
+            morans_csv = f"{self.analysis_name}_morans_by_sec.csv"
         
         acqn = acquisitions['acqn'].values
         acquisitions = acquisitions['acqpath'].values
@@ -98,7 +122,7 @@ class Preprocessing:
         path_data,
         acquisitions=None,
         metadata_csv="acquisitions_metadata.csv",
-        output_anndata="msi_preprocessed.h5ad",
+        output_anndata=None,
         max_dim=(500, 500)
     ):
         """
@@ -114,6 +138,7 @@ class Preprocessing:
             Path to the CSV file containing section-wise metadata (must have 'SectionID').
         output_anndata : str, optional
             Path to save the resulting AnnData object.
+            If None, defaults to "{analysis_name}_msi_preprocessed.h5ad".
         max_dim : tuple of int, optional
             Maximum dimensions (x, y) for zero-padding images.
 
@@ -122,6 +147,9 @@ class Preprocessing:
         sc.AnnData
             AnnData object with pixel-wise intensities and metadata.
         """
+        
+        if output_anndata is None:
+            output_anndata = f"{self.analysis_name}_msi_preprocessed.h5ad"
         
         root = zarr.open(path_data, mode='r')
         features = np.sort(list(root.group_keys()))
@@ -660,24 +688,29 @@ class Preprocessing:
 
     def save_msi_dataset(
         self,
-        filename="msi_dataset_preprocessing_ops.h5ad"
+        filename=None
     ):
         """
         Save the current AnnData object to disk.
 
         Parameters
         ----------
-        adata : sc.AnnData
-            The AnnData object containing MSI data.
         filename : str, optional
             File path to save the AnnData object.
+            If None, defaults to "{analysis_name}_msi_dataset_preprocessing_ops.h5ad".
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_msi_dataset_preprocessing_ops.h5ad"
+        
+        if self.adata is None:
+            raise ValueError("No AnnData object to save. Use 'store_exp_data_metadata' or 'load_msi_dataset' first.")
+        
         self.adata.write_h5ad(filename)
 
 
     def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
         self,
-        filename="prep_msi_dataset.h5ad"
+        filename=None
     ) -> sc.AnnData:
         """
         Load an AnnData object from disk.
@@ -686,12 +719,16 @@ class Preprocessing:
         ----------
         filename : str, optional
             File path from which to load the AnnData object.
+            If None, defaults to "{analysis_name}_prep_msi_dataset.h5ad".
 
         Returns
         -------
         sc.AnnData
             The loaded AnnData object.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_prep_msi_dataset.h5ad"
+        
         adata = sc.read_h5ad(filename)
         self.adata = adata
 
@@ -700,7 +737,7 @@ class Preprocessing:
         path_data,
         acquisitions,
         annotation_to_mz,
-        output_csv="prioritized_adducts.csv"
+        output_csv=None
     ):
         """
         Prioritize adducts by total signal across sections.
@@ -715,6 +752,7 @@ class Preprocessing:
             Dictionary mapping annotation -> list of candidate m/z values.
         output_csv : str, optional
             Path to save the dictionary of best adduct to CSV.
+            If None, defaults to "{analysis_name}_prioritized_adducts.csv".
 
         Returns
         -------
@@ -722,6 +760,8 @@ class Preprocessing:
             A dictionary mapping each annotation to its best m/z value.
         """
 
+        if output_csv is None:
+            output_csv = f"{self.analysis_name}_prioritized_adducts.csv"
 
         acqn = acquisitions['acqn'].values
         acquisitions = acquisitions['acqpath'].values
@@ -772,7 +812,7 @@ class Preprocessing:
 
         # Optionally save the results
         pd.DataFrame.from_dict(annotation_to_mz_bestadduct, orient='index').to_csv(output_csv)
-        totsig_df.to_csv("totsig_df_" + output_csv)
+        totsig_df.to_csv(f"{self.analysis_name}_totsig_df_" + os.path.basename(output_csv))
         return annotation_to_mz_bestadduct, totsig_df
 
     def feature_selection(
@@ -782,7 +822,7 @@ class Preprocessing:
         mz_vals: list = None,  # if provided, these m/z values override all other criteria
         moran_threshold: float = 0.25,
         cluster_k: int = 10,
-        output_csv: str = "feature_scores.csv",
+        output_csv: str = None,
         remove_untrustworthy: bool = False
     ):
         """
@@ -809,6 +849,7 @@ class Preprocessing:
             Number of clusters for grouping features in "combined" modality.
         output_csv : str, optional
             File path to save the feature scores.
+            If None, defaults to "{analysis_name}_feature_scores.csv".
         remove_untrustworthy : bool, optional
             If True, then features whose lipid names contain '_db' will be removed.
         
@@ -821,6 +862,9 @@ class Preprocessing:
         from sklearn.preprocessing import StandardScaler
         from sklearn.cluster import KMeans
         import scanpy as sc
+        
+        if output_csv is None:
+            output_csv = f"{self.analysis_name}_feature_scores.csv"
         
         # --- Step 0. Manual override: if mz_vals is provided, simply use these features.
         if mz_vals is not None and len(mz_vals) > 0:
@@ -934,8 +978,8 @@ class Preprocessing:
     
             # --- Output CSV file with the cluster assignments for each m/z feature
             cluster_assignments = scores_df[['cluster']]
-            cluster_assignments.to_csv("cluster_assignments.csv")
-            print("Cluster assignments CSV saved as 'cluster_assignments.csv'.")
+            cluster_assignments.to_csv(f"{self.analysis_name}_cluster_assignments.csv")
+            print(f"Cluster assignments CSV saved as '{self.analysis_name}_cluster_assignments.csv'.")
     
             # --- Interactive manual cluster selection:
             user_input = input("Enter the cluster numbers you want to keep (comma-separated), "

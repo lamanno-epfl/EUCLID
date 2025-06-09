@@ -26,7 +26,7 @@ os.environ['OMP_NUM_THREADS'] = '6'
 
 class Embedding():
     
-    def __init__(self, prep):
+    def __init__(self, prep, analysis_name="analysis"):
         """
         Initialize the Embedding class with preprocessed data.
 
@@ -34,7 +34,10 @@ class Embedding():
         -----------
         prep : object
             A preprocessing object containing AnnData (adata) with single-cell data.
+        analysis_name : str, optional
+            Prefix for all output files. Default is "analysis".
         """
+        self.analysis_name = analysis_name
         if prep is not None:
             self.adata = prep.adata
             self.data_df = pd.DataFrame(prep.adata.X, 
@@ -315,8 +318,8 @@ class Embedding():
         
     def save_msi_dataset(
         self,
-        filename="emb_msi_dataset.h5ad",
-        pdf_filename="embeddings_spatial.pdf",
+        filename=None,
+        pdf_filename=None,
         plot_embeddings=False
     ):
         """
@@ -325,12 +328,19 @@ class Embedding():
         Parameters
         ----------
         filename : str, optional
-            File path to save the AnnData object.
+            File path to save the AnnData object. If None, uses analysis_name prefix.
         pdf_filename : str, optional
-            File path to save the spatial embeddings PDF. Only used if plot_embeddings is True.
+            File path to save the spatial embeddings PDF. If None, uses analysis_name prefix.
+            Only used if plot_embeddings is True.
         plot_embeddings : bool, optional
             Whether to generate and save spatial embedding plots. Default is False.
         """
+        
+        # Set default filenames with analysis_name prefix
+        if filename is None:
+            filename = f"{self.analysis_name}_emb_msi_dataset.h5ad"
+        if pdf_filename is None:
+            pdf_filename = f"{self.analysis_name}_embeddings_spatial.pdf"
         
         # Save AnnData object
         for k, v in list(self.adata.obsm.items()):
@@ -421,7 +431,7 @@ class Embedding():
 
     def load_msi_dataset( # THIS SERVES AS AN ALTERNATIVE INIT
         self,
-        filename="emb_msi_dataset.h5ad"
+        filename=None
     ) -> sc.AnnData:
         """
         Load an AnnData object from disk.
@@ -429,12 +439,14 @@ class Embedding():
         Parameters
         ----------
         filename : str, optional
-            File path from which to load the AnnData object.
+            File path from which to load the AnnData object. If None, uses analysis_name prefix.
 
         Returns
         -------
         sc.AnnData
             The loaded AnnData object.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_emb_msi_dataset.h5ad"
         adata = sc.read_h5ad(filename)
         self.adata = adata

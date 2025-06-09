@@ -95,9 +95,12 @@ class Clustering:
     Parameters
     ----------
     emb: a EUCLID Embedding object
+    analysis_name: str, optional
+        Prefix for all output files. Default is "analysis".
     """
-    def __init__(self, emb):
+    def __init__(self, emb, analysis_name="analysis"):
 
+        self.analysis_name = analysis_name
         if emb is None:
             self.adata = None
 
@@ -490,7 +493,7 @@ class Clustering:
                                 xgb_random_state=42,
                                 xgb_n_jobs=6,
                                 early_stopping_rounds=7,
-                                plot_dir="clustering_plots",
+                                plot_dir=None,
                                 do_plotting=False):
         """
         Learn a hierarchical bipartite clustering tree on the dataset.
@@ -515,6 +518,8 @@ class Clustering:
         """
         # Create plot directory if it doesn't exist
         if do_plotting:
+            if plot_dir is None:
+                plot_dir = f"{self.analysis_name}_clustering_plots"
             os.makedirs(plot_dir, exist_ok=True)
 
             # Define global plotting parameters
@@ -902,8 +907,8 @@ class Clustering:
         )
 
         # 6) SAVE RESULTS
-        clusteringLOG.to_parquet("tree_clustering_euclid.parquet")
-        with open("rootnode_clustering_euclid.pkl", "wb") as f:
+        clusteringLOG.to_parquet(f"{self.analysis_name}_tree_clustering_euclid.parquet")
+        with open(f"{self.analysis_name}_rootnode_clustering_euclid.pkl", "wb") as f:
             pickle.dump(root_node, f)
 
         return root_node, clusteringLOG
@@ -1229,15 +1234,17 @@ class Clustering:
     # -------------------------------------------------------------------------
     # BLOCK 6: Plot each cluster to separate PDF files for inspection.
     # -------------------------------------------------------------------------
-    def clean_corrupted_pdfs(self, output_folder="lipizones_output"):
+    def clean_corrupted_pdfs(self, output_folder=None):
         """
         Clean up any corrupted PDF files in the output folder.
         
         Parameters
         ----------
         output_folder : str, optional
-            Folder containing the PDF files to check.
+            Folder containing the PDF files to check. If None, uses analysis_name prefix.
         """
+        if output_folder is None:
+            output_folder = f"{self.analysis_name}_lipizones_output"
         if not os.path.exists(output_folder):
             return
             
@@ -1260,7 +1267,7 @@ class Clustering:
         else:
             print("No corrupted PDF files found")
 
-    def clusters_to_pdf(self, output_folder="lipizones_output", pdf_filename="clusters_combined.pdf"):
+    def clusters_to_pdf(self, output_folder=None, pdf_filename=None):
         """
         Plot each cluster (lipizone) separately into PDF files.
         
@@ -1269,10 +1276,14 @@ class Clustering:
         lipizone_names : pd.Series
             A Series of cluster labels (or names) per pixel.
         output_folder : str, optional
-            Folder in which to save individual PDFs.
+            Folder in which to save individual PDFs. If None, uses analysis_name prefix.
         pdf_filename : str, optional
-            Final merged PDF filename.
+            Final merged PDF filename. If None, uses analysis_name prefix.
         """
+        if output_folder is None:
+            output_folder = f"{self.analysis_name}_lipizones_output"
+        if pdf_filename is None:
+            pdf_filename = f"{self.analysis_name}_clusters_combined.pdf"
         os.makedirs(output_folder, exist_ok=True)
         # Extract coordinate and lipizone information from adata.obs
         # Get the subset of adata.obs corresponding to reconstructed_data_df
@@ -1544,31 +1555,35 @@ class Clustering:
         plt.tight_layout()
         plt.show()
 
-    def save_msi_dataset(self, filename="clustering_msi_dataset.h5ad"):
+    def save_msi_dataset(self, filename=None):
         """
         Save the current AnnData object to disk.
 
         Parameters
         ----------
         filename : str, optional
-            File path to save the AnnData object.
+            File path to save the AnnData object. If None, uses analysis_name prefix.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_clustering_msi_dataset.h5ad"
         self.adata.write_h5ad(filename)
 
-    def load_msi_dataset(self, filename="clustering_msi_dataset.h5ad"):
+    def load_msi_dataset(self, filename=None):
         """
         Load an AnnData object from disk and reinitialize the Clustering object.
 
         Parameters
         ----------
         filename : str, optional
-            File path from which to load the AnnData object.
+            File path from which to load the AnnData object. If None, uses analysis_name prefix.
 
         Returns
         -------
         sc.AnnData
             The loaded AnnData object.
         """
+        if filename is None:
+            filename = f"{self.analysis_name}_clustering_msi_dataset.h5ad"
 
         class EmbeddingWrapper:
             def __init__(self, adata):
@@ -1576,6 +1591,6 @@ class Clustering:
 
         adata = sc.read_h5ad(filename)
         emb_wrapper = EmbeddingWrapper(adata)
-        self.__init__(emb_wrapper)
+        self.__init__(emb_wrapper, self.analysis_name)
 
 

@@ -68,11 +68,17 @@ class Plotting:
         DataFrame with spatial coordinates (e.g. 'SectionID', 'xccf', 'yccf', 'zccf').
     extra_data : dict, optional
         Additional data (e.g. feature selection scores) stored in adata.uns or elsewhere.
+    analysis_name : str, optional
+        Prefix for all output files and plot directories. Default is "analysis".
     """
-    def __init__(self, adata, extra_data=None):
+    def __init__(self, adata, extra_data=None, analysis_name="analysis"):
         self.adata = adata
         self.coordinates = self.adata.obs[['SectionID', 'xccf', 'yccf', 'zccf']]
         self.extra_data = extra_data if extra_data is not None else {}
+        self.analysis_name = analysis_name
+        self.plots_dir = f"{analysis_name}_plots"
+        if not os.path.exists(self.plots_dir):
+            os.makedirs(self.plots_dir)
 
     @staticmethod
     def extract_class(lipid_name: str) -> str:
@@ -117,7 +123,7 @@ class Plotting:
                                    autopct='%1.1f%%', startangle=90, textprops={'fontsize': 10})
         ax.set_ylabel('')
         plt.title("Lipid Class Distribution")
-        save_path = os.path.join(PLOTS_DIR, "msi_prop.pdf")
+        save_path = os.path.join(self.plots_dir, "msi_prop.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -165,7 +171,7 @@ class Plotting:
         plt.tick_params(axis='y', which='both', left=False, right=False)
         plt.tight_layout()
         plt.legend(title='Insaturations')
-        save_path = os.path.join(PLOTS_DIR, "chainlength_insat_LCMS.pdf")
+        save_path = os.path.join(self.plots_dir, "chainlength_insat_LCMS.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -198,27 +204,29 @@ class Plotting:
           - Crop by x, y, and/or z ranges.
           - Layout is computed dynamically (aiming for a ~4:3 page ratio) if not provided.
           - Optionally overlay anatomical contours.
-        
+
         Parameters
         ----------
-        data : pd.DataFrame
-            DataFrame with spatial columns ('zccf', 'yccf', 'xccf', 'SectionID') and lipid values.
         lipid : str
-            Column name (feature) to plot.
+            The lipid name to plot.
         section_filter : list, optional
-            List of section numbers to include.
+            List of section IDs to include.
         metadata_filter : dict, optional
-            Dictionary of {column: [accepted_values]} for filtering.
+            Dictionary where keys are metadata columns and values are lists of allowed values.
         lipizone_filter : dict, optional
-            Dictionary to filter based on lipizone metadata.
-        x_range, y_range, z_range : tuple, optional
-            Tuples (min, max) to crop data along the respective axes.
+            Dictionary for filtering by lipizone properties.
+        x_range : tuple, optional
+            (x_min, x_max) for cropping.
+        y_range : tuple, optional
+            (y_min, y_max) for cropping.
+        z_range : tuple, optional
+            (z_min, z_max) for cropping.
         layout : tuple, optional
-            Grid layout (nrows, ncols). If None, computed dynamically.
+            (rows, cols) layout for subplots.
         point_size : float, optional
-            Marker size.
+            Size of the scatter plot points.
         show_contours : bool, optional
-            If True, overlay contours based on contour_column.
+            Whether to overlay anatomical contours.
         contour_column : str, optional
             Column name indicating anatomical contours.
         show_inline : bool, optional
@@ -333,7 +341,7 @@ class Plotting:
         fig.colorbar(sm, ax=axes.tolist(), fraction=0.02, pad=0.04)
         
         plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, f"{lipid}_distribution.pdf")
+        save_path = os.path.join(self.plots_dir, f"{lipid}_distribution.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -463,7 +471,7 @@ class Plotting:
         plt.tight_layout(rect=[0, 0, 0.9, 1])
         
         # 8) Save + show/close
-        save_path = os.path.join(PLOTS_DIR, f"{currentProgram}_embeddings.pdf")
+        save_path = os.path.join(self.plots_dir, f"{currentProgram}_embeddings.pdf")
         plt.savefig(save_path)
         
         if show_inline:
@@ -547,8 +555,7 @@ class Plotting:
         for j in range(idx+1, len(axes)):
             fig.delaxes(axes[j])
         plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, "merged_lipizones.pdf")
-        # Optionally merge individual PDFs; here we simply save one multi-panel PDF.
+        save_path = os.path.join(self.plots_dir, "merged_lipizones.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -765,7 +772,7 @@ class Plotting:
             fname = f"tsne_cat_{attribute}"
         else:  # color
             fname = f"tsne_colorcol_{attribute}"
-        save_path = os.path.join(PLOTS_DIR, f"{fname}.pdf")
+        save_path = os.path.join(self.plots_dir, f"{fname}.pdf")
         plt.tight_layout()
         plt.savefig(save_path)
 
@@ -807,12 +814,10 @@ class Plotting:
         plt.figure(figsize=(20, 5))
         ax = sns.heatmap(sorted_data, cmap="Grays", cbar_kws={'label': 'Enrichment'},
                          xticklabels=xticklabels, yticklabels=yticklabels, vmin=vmin, vmax=vmax)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)
-        plt.tick_params(axis='y', which='both', left=False, right=False)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
         plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, "sorted_heatmap.pdf")
+        save_path = os.path.join(self.plots_dir, "sorted_heatmap.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -844,15 +849,21 @@ class Plotting:
         ax.set_zlabel(f'PC3 ({var_exp[2]:.1f}% var)')
         ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
         plt.title("3D PCA of Centroids")
-        save_path = os.path.join(PLOTS_DIR, "pca_centroids.pdf")
+        plt.xlabel('PC1')
+        plt.ylabel('PC2')
+        plt.title('Sample Correlation PCA')
         plt.tight_layout()
+        save_path = os.path.join(self.plots_dir, "pca_centroids.pdf")
+        
         plt.savefig(save_path)
         if show_inline:
             plt.show()
         else:
             plt.close()
+        
+        # Also create a correlation heatmap
         cg = sns.clustermap(centroids.T.corr(), cmap="viridis", figsize=(10, 10))
-        cg.savefig(os.path.join(PLOTS_DIR, "sample_correlation_heatmap.pdf"))
+        cg.savefig(os.path.join(self.plots_dir, "sample_correlation_heatmap.pdf"))
         plt.close()
 
     def plot_differential_barplot(self, diff_df: pd.DataFrame, indices_to_label: list,
@@ -881,12 +892,12 @@ class Plotting:
             texts.append(plt.text(x, y, label, ha="center", va="bottom"))
         adjust_text(texts, arrowprops=dict(arrowstyle="->", color="gray", lw=0.5),
                     expand_points=(1.5, 1.5))
-        plt.gca().spines["top"].set_visible(False)
-        plt.gca().spines["right"].set_visible(False)
-        plt.ylabel(ylabel)
-        plt.xticks([])
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        plt.gca().spines['left'].set_visible(False)
+        plt.gca().spines['bottom'].set_visible(False)
         plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, "differential_barplot.pdf")
+        save_path = os.path.join(self.plots_dir, "differential_barplot.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -966,7 +977,7 @@ class Plotting:
         for j in range(idx+1, len(axes)):
             fig.delaxes(axes[j])
         plt.tight_layout()
-        save_path = os.path.join(PLOTS_DIR, "global_lipidomic_similarity.pdf")
+        save_path = os.path.join(self.plots_dir, "global_lipidomic_similarity.pdf")
         plt.savefig(save_path)
         if show_inline:
             plt.show()
@@ -1048,75 +1059,47 @@ class Plotting:
                 # Optionally, add lipid names as text
                 if col_i == 0:
                     ax.set_ylabel(f"{', '.join(lipid_set)}", color='white', fontsize=8)
-        plt.savefig(os.path.join(PLOTS_DIR, output_file), dpi=300)
+        plt.savefig(os.path.join(self.plots_dir, output_file), dpi=300)
         plt.close(fig)
-        print(f"Saved lipid RGB grid plot to {os.path.join(PLOTS_DIR, output_file)}")
+        print(f"Saved lipid RGB grid plot to {os.path.join(self.plots_dir, output_file)}")
 
     def plot_lipizones_entire_dataset(self, section_col='SectionPlot', output_file="dataset_lipizones_entire.png"):
         """
-        Visualize the entire dataset: all unique Samples and all unique sections, offset for clarity.
-        Each column is a Sample, each row is a section (SectionPlot or SectionID).
-        Colors by adata.obs['lipizone_color'].
-
+        Plot the entire dataset's lipizones in a single subplot.
+        
         Parameters
         ----------
         section_col : str, optional
-            Column in adata.obs to use for section (default 'SectionPlot').
+            Column name containing section information for grouping.
         output_file : str, optional
-            Output filename (PNG, saved in plots directory).
+            Name of the output file.
         """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import pandas as pd
-
-        all_data = self.adata.obs.copy()
-        if section_col not in all_data.columns:
-            raise ValueError(f"{section_col} not found in adata.obs columns.")
-        if 'Sample' not in all_data.columns:
-            raise ValueError("'Sample' not found in adata.obs columns.")
-        if 'lipizone_color' not in all_data.columns:
-            raise ValueError("'lipizone_color' not found in adata.obs columns.")
-        if 'x' not in all_data.columns or 'y' not in all_data.columns:
-            raise ValueError("'x' and 'y' must be present in adata.obs.")
-
-        sectionplots = sorted(all_data[section_col].unique())
-        samples = sorted(all_data['Sample'].unique())
-        fig, ax = plt.subplots(figsize=(24, 10))
-
-        # Spacing parameters
-        row_spacing = 50.0
-        row_overlap = 50.0
-        col_spacing = 450.0
-
-        for i, sp in enumerate(sectionplots):
-            data_sp = all_data[all_data[section_col] == sp]
-            for j, smp in enumerate(samples):
-                data_subset = data_sp[data_sp['Sample'] == smp]
-                if data_subset.empty:
-                    continue
-                row_offset_x = row_overlap * i
-                row_offset_y = row_spacing * i
-                col_offset_x = col_spacing * j
-                # Apply offsets
-                plot_x = data_subset['y'] + row_offset_x + col_offset_x
-                plot_y = -data_subset['x'] + row_offset_y
-                ax.scatter(
-                    plot_x,
-                    plot_y,
-                    c=data_subset['lipizone_color'],
-                    s=0.7,
-                    alpha=0.7,
-                    rasterized=True
-                )
-        ax.set_aspect('equal', 'datalim')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
+        data = self.adata.obs.copy()
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(20, 15))
+        
+        # Plot each section
+        for section in sorted(data[section_col].unique()):
+            section_data = data[data[section_col] == section]
+            
+            # Use lipizone colors if available
+            if 'lipizone_color' in section_data.columns:
+                colors = section_data['lipizone_color']
+            else:
+                colors = 'blue'  # default color
+            
+            ax.scatter(section_data['zccf'], -section_data['yccf'], 
+                      c=colors, s=0.5, alpha=0.7, rasterized=True)
+        
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_title('Entire Dataset Lipizones', fontsize=16)
+        
         plt.tight_layout()
-        plt.savefig(os.path.join(PLOTS_DIR, output_file), dpi=300)
-        plt.close(fig)
-        print(f"Saved entire dataset lipizone plot to {os.path.join(PLOTS_DIR, output_file)}")
+        plt.savefig(os.path.join(self.plots_dir, output_file), dpi=300)
+        plt.close()
+        print(f"Saved entire dataset lipizone plot to {os.path.join(self.plots_dir, output_file)}")
 
     def create_lipids_movie(
         pc_list=None,
@@ -1502,14 +1485,14 @@ class Plotting:
             scatter.set_facecolors(current_colors)
             return scatter,
 
-        ani = animation.FuncAnimation(
-            fig, animate, frames=n_frames, init_func=init,
-            interval=interval, blit=True
-        )
-        output_path = os.path.join(PLOTS_DIR, f"{output_prefix}_{section_id}.mp4")
+        # Create animation
+        ani = animation.FuncAnimation(fig, animate, init_func=init, frames=n_frames, interval=interval, blit=True)
+        
+        # Save animation
+        output_path = os.path.join(self.plots_dir, f"{output_prefix}_{section_id}.mp4")
         ani.save(output_path, writer='ffmpeg', fps=30)
-        plt.close(fig)
-        print(f"Saved lipizone rain movie to {output_path}")
+        plt.close()
+        print(f"Lipizone rain movie saved to {output_path}")
 
     def make_splitter_movie(self, section_id, level_prefix='level_', n_levels=10, frames_per_level=5, output_file="level_transitions_animation.mp4", point_size=2.0):
         """
@@ -1613,20 +1596,20 @@ class Plotting:
             scatter.set_facecolors(colors)
             return scatter,
 
-        ani = animation.FuncAnimation(
-            fig, animate, frames=total_frames, init_func=init,
-            interval=500, blit=True
-        )
-        output_path = os.path.join(PLOTS_DIR, output_file)
+        # Create animation
+        ani = animation.FuncAnimation(fig, animate, init_func=init, frames=total_frames, interval=500, blit=True)
+        
+        # Save animation
+        output_path = os.path.join(self.plots_dir, output_file)
         ani.save(output_path, writer='ffmpeg', fps=2)
-        plt.close(fig)
+        plt.close()
         print(f"Saved splitter movie to {output_path}")
 
     def create_marching_cubes_volumes(self, 
                                      label_col='Lipizone_names', 
                                      color_col='lipizone_color', 
                                      x_col='x_index', y_col='y_index', z_col='z_index',
-                                     out_dir="3d_lipizone_renders",
+                                     out_dir=None,
                                      grid_shape=(528, 320, 456),
                                      structure_size=12,
                                      keep_top_k=4,
@@ -1638,9 +1621,44 @@ class Plotting:
                                      mesh_smoothing_iterations=2,
                                      mesh_smoothing_factor=0.2):
         """
-        For each cluster in adata.obs[label_col], voxelize, clean, smooth, symmetrize, extract mesh with marching cubes, and save as .npz.
-        Parameters follow your original rationale, but are adapted to adata structure.
+        Create 3D volume renders for lipizones using marching cubes.
+        
+        Parameters
+        ----------
+        label_col : str, optional
+            Column containing lipizone labels.
+        color_col : str, optional
+            Column containing lipizone colors.
+        x_col, y_col, z_col : str, optional
+            Column names for spatial coordinates.
+        out_dir : str, optional
+            Output directory for 3D meshes.
+            If None, defaults to "{analysis_name}_3d_lipizone_renders".
+        grid_shape : tuple, optional
+            3D grid shape for voxelization.
+        structure_size : int, optional
+            Size of morphological structuring element.
+        keep_top_k : int, optional
+            Number of largest connected components to keep.
+        symmetrize : bool, optional
+            Whether to symmetrize the volumes.
+        marching_level : float, optional
+            Iso-level for marching cubes.
+        voxel_spacing : tuple, optional
+            Spacing between voxels.
+        origin : tuple, optional
+            Origin coordinates.
+        gaussian_sigma : float, optional
+            Sigma for Gaussian smoothing.
+        mesh_smoothing_iterations : int, optional
+            Number of mesh smoothing iterations.
+        mesh_smoothing_factor : float, optional
+            Mesh smoothing factor.
         """
+        
+        if out_dir is None:
+            out_dir = f"{self.analysis_name}_3d_lipizone_renders"
+
         import numpy as np
         import os
         from scipy.ndimage import binary_closing, label, gaussian_filter
@@ -1732,11 +1750,33 @@ class Plotting:
                 continue
         print(f"Saved all meshes to {out_dir}")
 
-    def plot_marching_cubes_plotly(self, out_dir="3d_lipizone_renders", labels_to_plot=None, color_col='lipizone_color', opacity_mesh=0.8, html_file="lipizone_3d.html", volume_trace=None):
+    def plot_marching_cubes_plotly(self, out_dir=None, labels_to_plot=None, color_col='lipizone_color', opacity_mesh=0.8, html_file=None, volume_trace=None):
         """
-        Load saved marching cubes meshes from out_dir and overlay them in a Plotly 3D scene, coloring by cluster, and export as HTML.
-        Optionally add a background anatomical volume (volume_trace).
+        Load meshes from create_marching_cubes_volumes and plot with Plotly.
+        
+        Parameters
+        ----------
+        out_dir : str, optional
+            Directory containing .npz mesh files.
+            If None, defaults to "{analysis_name}_3d_lipizone_renders".
+        labels_to_plot : list, optional
+            Specific labels to plot. If None, plots all available.
+        color_col : str, optional
+            Column for colors.
+        opacity_mesh : float, optional
+            Mesh opacity.
+        html_file : str, optional
+            Output HTML file name.
+            If None, defaults to "{analysis_name}_lipizone_3d.html".
+        volume_trace : optional
+            Additional volume trace to include.
         """
+        
+        if out_dir is None:
+            out_dir = f"{self.analysis_name}_3d_lipizone_renders"
+        if html_file is None:
+            html_file = f"{self.analysis_name}_lipizone_3d.html"
+
         import numpy as np
         import os
         import plotly.graph_objects as go
