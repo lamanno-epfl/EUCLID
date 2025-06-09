@@ -48,6 +48,14 @@ import subprocess
 from threadpoolctl import threadpool_limits
 from scipy import sparse
 from tqdm import tqdm
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.ndimage import gaussian_filter
+import gc
+from skimage.morphology import binary_erosion
 
 mpl.rcParams['pdf.fonttype'] = 42
 
@@ -824,6 +832,101 @@ class Plotting:
         else:
             plt.close()
 
+    def plot_olosorted_lipid_lipizone(self, show_inline: bool = True) -> None:
+        """
+        Plot a heatmap of 01-normalized lipid data averaged by lipizone_names,
+        with both rows and columns sorted by optimal-leaf-ordering using cosine similarity.
+        
+        Parameters
+        ----------
+        show_inline : bool, optional
+            Whether to display the plot inline.
+        """
+        from sklearn.metrics.pairwise import cosine_similarity
+        from sklearn.preprocessing import MinMaxScaler
+        
+        # Extract lipidome data
+        if 'X_lipidome' not in self.adata.obsm:
+            raise ValueError("'X_lipidome' not found in adata.obsm")
+        
+        if 'lipidome_names' not in self.adata.uns:
+            raise ValueError("'lipidome_names' not found in adata.uns")
+        
+        if 'lipizone_names' not in self.adata.obs:
+            raise ValueError("'lipizone_names' not found in adata.obs")
+        
+        # Get the data
+        lipid_data = self.adata.obsm['X_lipidome']
+        lipid_names = self.adata.uns['lipidome_names']
+        lipizone_names = self.adata.obs['lipizone_names']
+        
+        # Normalize each lipid individually to 0-1 range (01-normalization per lipid)
+        # Scale each column (lipid) separately so each lipid ranges from 0 to 1
+        norm_data = np.zeros_like(lipid_data)
+        for i in range(lipid_data.shape[1]):
+            col_min = lipid_data[:, i].min()
+            col_max = lipid_data[:, i].max()
+            if col_max > col_min:  # Avoid division by zero
+                norm_data[:, i] = (lipid_data[:, i] - col_min) / (col_max - col_min)
+            else:
+                norm_data[:, i] = 0  # If all values are the same, set to 0
+        
+        # Create DataFrame
+        df = pd.DataFrame(norm_data, columns=lipid_names, index=self.adata.obs_names)
+        df['lipizone_names'] = lipizone_names
+        
+        # Remove rows with NaN lipizone_names
+        df = df.dropna(subset=['lipizone_names'])
+        
+        # Average by lipizone_names
+        averaged_df = df.groupby('lipizone_names').mean()
+        
+        # Compute cosine similarity and convert to distance for clustering
+        # For rows (lipizones)
+        cos_sim_rows = cosine_similarity(averaged_df.values)
+        cos_dist_rows = 1 - cos_sim_rows
+        
+        # For columns (lipids)  
+        cos_sim_cols = cosine_similarity(averaged_df.values.T)
+        cos_dist_cols = 1 - cos_sim_cols
+        
+        # Convert to condensed distance matrices
+        row_distances = squareform(cos_dist_rows, checks=False)
+        col_distances = squareform(cos_dist_cols, checks=False)
+        
+        # Perform hierarchical clustering with optimal leaf ordering
+        row_linkage = linkage(row_distances, method='average', optimal_ordering=True)
+        col_linkage = linkage(col_distances, method='average', optimal_ordering=True)
+        
+        # Get the optimal ordering
+        row_order = leaves_list(row_linkage)
+        col_order = leaves_list(col_linkage)
+        
+        # Reorder the DataFrame
+        sorted_df = averaged_df.iloc[row_order, col_order]
+        
+        # Create the heatmap
+        plt.figure(figsize=(20, 12))
+        sns.heatmap(sorted_df, 
+                    cmap='Reds', 
+                    cbar_kws={'label': '01-normalized intensity'},
+                    xticklabels=True, 
+                    yticklabels=True)
+        
+        plt.title('Lipid Expression by Lipizone (Optimal Leaf Ordering)')
+        plt.xlabel('Lipids')
+        plt.ylabel('Lipizone Names')
+        plt.tight_layout()
+        
+        # Save the plot
+        save_path = os.path.join(self.plots_dir, "olosorted_lipid_lipizone_heatmap.pdf")
+        plt.savefig(save_path)
+        
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+
     def plot_sample_correlation_pca(self, centroids: pd.DataFrame, show_inline: bool = False) -> None:
         """
         Plot 3D PCA of sample centroids and a clustermap of their correlation.
@@ -1062,44 +1165,6 @@ class Plotting:
         plt.savefig(os.path.join(self.plots_dir, output_file), dpi=300)
         plt.close(fig)
         print(f"Saved lipid RGB grid plot to {os.path.join(self.plots_dir, output_file)}")
-
-    def plot_lipizones_entire_dataset(self, section_col='SectionPlot', output_file="dataset_lipizones_entire.png"):
-        """
-        Plot the entire dataset's lipizones in a single subplot.
-        
-        Parameters
-        ----------
-        section_col : str, optional
-            Column name containing section information for grouping.
-        output_file : str, optional
-            Name of the output file.
-        """
-        data = self.adata.obs.copy()
-        
-        # Create the plot
-        fig, ax = plt.subplots(figsize=(20, 15))
-        
-        # Plot each section
-        for section in sorted(data[section_col].unique()):
-            section_data = data[data[section_col] == section]
-            
-            # Use lipizone colors if available
-            if 'lipizone_color' in section_data.columns:
-                colors = section_data['lipizone_color']
-            else:
-                colors = 'blue'  # default color
-            
-            ax.scatter(section_data['zccf'], -section_data['yccf'], 
-                      c=colors, s=0.5, alpha=0.7, rasterized=True)
-        
-        ax.set_aspect('equal')
-        ax.axis('off')
-        ax.set_title('Entire Dataset Lipizones', fontsize=16)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.plots_dir, output_file), dpi=300)
-        plt.close()
-        print(f"Saved entire dataset lipizone plot to {os.path.join(self.plots_dir, output_file)}")
 
     def create_lipids_movie(
         pc_list=None,
@@ -1827,3 +1892,461 @@ class Plotting:
         )
         fig.write_html(html_file)
         print(f"Saved 3D plot to {html_file}")
+
+    import numpy as np
+    import pandas as pd
+    import scanpy as sc  # for AnnData aliasing
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from scipy.ndimage import gaussian_filter
+
+    def _build_2d_array_from_adata(
+        self,
+        values,            # full-length array of length n_obs
+        section,
+        section_key='Section',
+        x_key='z_index',
+        y_key='y_index',
+    ):
+        """
+        Construct a 2D image for a single section from AnnData, using only the obs in that section.
+        """
+        df = self.adata.obs
+        mask = df[section_key] == section
+        if not mask.any():
+            return None
+
+        xs = df.loc[mask, x_key].astype(int).values
+        ys = df.loc[mask, y_key].astype(int).values
+        vals = np.asarray(values)[mask]        # <-- select only this section's values
+
+        max_x = xs.max() + 1
+        max_y = ys.max() + 1
+        img = np.full((max_y, max_x), np.nan)
+        img[ys, xs] = vals
+        return img
+
+    def _build_3d_array_from_adata(
+        self,
+        values,            # full-length array of length n_obs
+        section_list=None,
+        section_key='Section',
+        x_key='z_index',
+        y_key='y_index',
+        z_key='x_index',
+    ):
+        """
+        Construct a 3D volume from AnnData across all sections (z-index).
+        """
+        df = self.adata.obs
+        if section_list is not None:
+            mask = df[section_key].isin(section_list)
+        else:
+            mask = np.ones(len(df), dtype=bool)
+
+        df_sel = df.loc[mask]
+        xs = df_sel[x_key].astype(int).values
+        ys = df_sel[y_key].astype(int).values
+        zs = df_sel[z_key].astype(int).values
+        vals = np.asarray(values)[mask]       # <-- again, select only these obs
+
+        max_x = xs.max() + 1
+        max_y = ys.max() + 1
+        max_z = zs.max() + 1
+        vol = np.full((max_z, max_y, max_x), np.nan)
+        vol[zs, ys, xs] = vals
+        return vol
+
+    def all_sections_lipid_visualizer(
+        self,
+        lipid_name,
+        section_key='Section',
+        x_key='z_index',
+        y_key='y_index',
+        n_cols=12,
+    ):
+        """
+        Grid of 2D heatmaps for lipid expression across sections in AnnData.
+        """
+        # Extract intensity vector
+        if lipid_name in self.adata.var_names:
+            vals = self.adata.X[:, self.adata.var_names.get_loc(lipid_name)].toarray().ravel() if hasattr(self.adata.X, 'toarray') else self.adata.X[:, self.adata.var_names.get_loc(lipid_name)]
+        else:
+            raise KeyError(f"Lipid '{lipid_name}' not found in adata.var_names")
+        sections = self.adata.obs[section_key].unique()
+        total = len(sections)
+        n_rows = (total + n_cols - 1) // n_cols
+        fig = make_subplots(rows=n_rows, cols=n_cols, horizontal_spacing=0.01, vertical_spacing=0.01)
+
+        valid = 0
+        max_h, max_w = 0, 0
+        # first pass: find max dims
+        for section in sections:
+            img = self._build_2d_array_from_adata(vals, section, section_key, x_key, y_key)
+            if img is None:
+                continue
+            max_h = max(max_h, img.shape[0])
+            max_w = max(max_w, img.shape[1])
+        aspect = max_h / max_w if max_w else 1
+        cell_w, cell_h = 100, int(100 * aspect)
+
+        # second pass: add traces
+        for section in sections:
+            img = self._build_2d_array_from_adata(vals, section, section_key, x_key, y_key)
+            if img is None:
+                continue
+            row = valid // n_cols + 1
+            col = valid % n_cols + 1
+            fig.add_trace(go.Heatmap(z=img, showscale=False, colorscale='viridis'), row=row, col=col)
+            fig.add_annotation(text=str(section), x=0.5, y=0.9, xref=f'x{valid+1}', yref=f'y{valid+1}', showarrow=False, font=dict(color='white', size=10))
+            valid += 1
+
+        fig.update_layout(
+            height=cell_h * n_rows + 100,
+            width=cell_w * n_cols + 100,
+            showlegend=False,
+            margin=dict(t=30, r=10, b=10, l=10),
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+        )
+        fig.update_xaxes(visible=False, showgrid=False, zeroline=False, scaleanchor='y')
+        fig.update_yaxes(visible=False, showgrid=False, zeroline=False, scaleanchor='x')
+        return fig
+
+    def all_sections_lipizone_visualizer(
+        self,
+        section_key='Section',
+        x_key='z_index',
+        y_key='y_index',
+        lipizone_key='lipizone',
+        lipizone_color_key='lipizone_color',
+        n_cols=12,
+    ):
+        """
+        Grid mosaic of lipizone assignments across sections from AnnData.
+        """
+        df = self.adata.obs
+        if lipizone_key not in df.columns or lipizone_color_key not in df.columns:
+            raise KeyError('Lipizone keys not found in adata.obs')
+        sections = df[section_key].unique()
+        total = len(sections)
+        n_rows = (total + n_cols - 1) // n_cols
+        fig = make_subplots(rows=n_rows, cols=n_cols,
+                            horizontal_spacing=0.01, vertical_spacing=0.01)
+
+        valid = 0
+        max_h, max_w = 0, 0
+        # First pass: compute integer dims
+        for section in sections:
+            sel = df[df[section_key] == section]
+            if sel.empty:
+                continue
+            h = int(sel[y_key].max()) + 1
+            w = int(sel[x_key].max()) + 1
+            max_h = max(max_h, h)
+            max_w = max(max_w, w)
+
+        # Guarantee ints
+        max_h, max_w = int(max_h), int(max_w)
+
+        aspect = max_h / max_w if max_w else 1
+        cell_w, cell_h = 100, int(100 * aspect)
+
+        # Second pass: render each section
+        for section in sections:
+            sel = df[df[section_key] == section]
+            if sel.empty:
+                continue
+
+            # Build RGB image
+            img = np.zeros((max_h, max_w, 3), dtype=np.uint8)
+            img[:] = 0
+            for _, row in sel.iterrows():
+                x, y = int(row[x_key]), int(row[y_key])
+                color = row[lipizone_color_key]
+                if isinstance(color, str) and color.startswith('#'):
+                    r = int(color[1:3], 16)
+                    g = int(color[3:5], 16)
+                    b = int(color[5:7], 16)
+                    img[y, x] = [r, g, b]
+
+            # Place in subplot
+            row_i = valid // n_cols + 1
+            col_i = valid % n_cols + 1
+            fig.add_trace(go.Image(z=img), row=row_i, col=col_i)
+            fig.add_annotation(
+                text=str(section),
+                x=0.5, y=0.9,
+                xref=f'x{valid+1}',
+                yref=f'y{valid+1}',
+                showarrow=False,
+                font=dict(color='white', size=10),
+            )
+            valid += 1
+
+        fig.update_layout(
+            height=cell_h * n_rows + 100,
+            width= cell_w * n_cols + 100,
+            showlegend=False,
+            margin=dict(t=30, r=10, b=10, l=10),
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+        )
+        return fig
+
+    def treemap_lipizones_adata(
+        self,
+        path=None,
+        lipizone_key='lipizone',
+        color_key='lipizone_color',
+        maxdepth=2
+    ):
+        """
+        Generate a hierarchical treemap of lipizones directly from AnnData.
+
+        Args:
+            path (list of str, optional): Sequence of obs column names defining hierarchy. 
+                If None, uses [lipizone_key].
+            lipizone_key (str): Column in obs containing lipizone name.
+            color_key (str): Column in obs containing hex color for each lipizone.
+            maxdepth (int): Maximum depth to display in treemap.
+
+        Returns:
+            plotly.graph_objects.Figure: A dark-themed treemap figure.
+        """
+        df = self.adata.obs.copy()
+        # Default single-level hierarchy
+        if path is None:
+            path = [lipizone_key]
+        # Build discrete color map from unique lipizones
+        unique = df[[lipizone_key, color_key]].drop_duplicates()
+        color_map = dict(zip(unique[lipizone_key], unique[color_key]))
+
+        # Build treemap
+        fig = px.treemap(
+            df,
+            path=path,
+            values=None,  # uses count per leaf
+            color=lipizone_key,
+            color_discrete_map=color_map,
+            maxdepth=maxdepth,
+        )
+        # Dark theme layout
+        fig.update_layout(
+            template='plotly_dark',
+            margin=dict(t=30, r=0, b=10, l=0),
+            uniformtext=dict(minsize=12)
+        )
+        # Remove background grids
+        fig.layout.plot_bgcolor = 'rgba(0,0,0,0)'
+        fig.layout.paper_bgcolor = 'rgba(0,0,0,0)'
+        return fig
+
+    def scatter_lipizone_3d(
+        self,
+        section_list: list = None,
+        lipizone_key: str = 'lipizone',
+        section_key: str = 'Section',
+        x_key: str = 'z_index',
+        y_key: str = 'y_index',
+        z_key: str = 'x_index',
+    ) -> go.Figure:
+        """
+        Create a 3D scatter plot of lipizones.
+
+        Parameters
+        ----------
+        section_list : list, optional
+            List of sections to include. If None, uses all sections.
+        lipizone_key : str
+            Column name for lipizone names
+        section_key : str
+            Column name for section IDs
+        x_key : str
+            Column name for x coordinates
+        y_key : str
+            Column name for y coordinates
+        z_key : str
+            Column name for z coordinates
+
+        Returns
+        -------
+        go.Figure
+            A Plotly Figure containing the 3D scatter plot
+        """
+        df = self.adata.obs.copy()
+        if section_list is not None:
+            df = df[df[section_key].isin(section_list)]
+
+        # Get unique lipizones and their colors
+        unique_lipizones = df[lipizone_key].unique()
+        color_map = dict(zip(unique_lipizones, px.colors.qualitative.Set3[:len(unique_lipizones)]))
+
+        fig = go.Figure()
+        
+        for lipizone in unique_lipizones:
+            mask = df[lipizone_key] == lipizone
+            fig.add_trace(go.Scatter3d(
+                x=df.loc[mask, x_key],
+                y=df.loc[mask, y_key],
+                z=df.loc[mask, z_key],
+                mode='markers',
+                marker=dict(
+                    size=2,
+                    color=color_map[lipizone],
+                    opacity=0.8
+                ),
+                name=lipizone
+            ))
+
+        fig.update_layout(
+            template='plotly_dark',
+            scene=dict(
+                xaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                yaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                zaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                aspectmode="data",
+            ),
+            margin=dict(t=0, r=0, b=0, l=0),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    def compute_3d_lipid_figure_from_array(
+        self,
+        lipid_array: np.ndarray,
+        annotation_array: np.ndarray = None,
+        set_id_regions: list[int] = None,
+        downsample_factor: int = 1,
+        opacity: float = 0.4,
+        surface_count: int = 15,
+        colorscale: str = "Inferno",
+        root_decrease_dimensionality_factor: int = 4,
+    ) -> go.Figure:
+        """
+        Render a 3D volume of lipid data from a raw 3D NumPy array, with optional atlas context.
+
+        Parameters
+        ----------
+        lipid_array : np.ndarray
+            3D numpy array of lipid intensities, shape (Z, Y, X).
+        annotation_array : np.ndarray, optional
+            3D numpy array of atlas annotations (same shape as lipid_array before downsampling).
+        set_id_regions : list[int], optional
+            List of integer region IDs to mask lipid data to; if None, no masking.
+        downsample_factor : int
+            Factor by which to downsample both lipid and annotation volumes for speed.
+        opacity : float
+            Base opacity for the lipid volume.
+        surface_count : int
+            Number of isosurfaces for the lipid volume.
+        colorscale : str
+            Plotly colorscale name for the lipid volume.
+        root_decrease_dimensionality_factor : int
+            If annotation_array is provided, how much to subsample it when building the root volume.
+
+        Returns
+        -------
+        fig : go.Figure
+            A Plotly Figure containing (optionally) the semi‐transparent root volume first,
+            then the lipid volume on top.
+        """
+        data_traces = []
+
+        # --- 1) Atlas "root" border trace, if requested ---
+        if annotation_array is not None:
+            # subsample atlas
+            ann_sub = annotation_array[
+                ::root_decrease_dimensionality_factor,
+                ::root_decrease_dimensionality_factor,
+                ::root_decrease_dimensionality_factor,
+            ]
+            # simple border extraction: voxels in mask but not in eroded mask
+            mask = ann_sub > 0
+            eroded = binary_erosion(mask)
+            border = (mask & ~eroded).astype(float)
+
+            z0, y0, x0 = np.indices(border.shape)
+            root_trace = go.Volume(
+                x=x0.flatten(),
+                y=y0.flatten(),
+                z=z0.flatten(),
+                value=border.flatten(),
+                isomin=1.0,        # only the border voxels
+                isomax=1.0,
+                opacity=0.1,
+                surface_count=1,
+                colorscale="Greys",
+                caps=dict(x_show=False, y_show=False, z_show=False),
+                showscale=False,
+            )
+            data_traces.append(root_trace)
+
+        # --- 2) Downsample lipid data ---
+        lp = lipid_array[::downsample_factor, ::downsample_factor, ::downsample_factor]
+
+        # --- 3) Region‐masking, if requested ---
+        if annotation_array is not None and set_id_regions is not None:
+            ann_ds = annotation_array[
+                ::downsample_factor, ::downsample_factor, ::downsample_factor
+            ]
+            mask = np.zeros_like(ann_ds, dtype=bool)
+            for rid in set_id_regions:
+                mask |= (ann_ds == rid)
+            lp_masked = lp.copy()
+            lp_masked[~mask] = np.nan
+        else:
+            lp_masked = lp
+
+        # --- 4) Lipid trace with custom opacityscale ---
+        z1, y1, x1 = np.indices(lp_masked.shape)
+        opacityscale = [
+            [0.0, 0.0],
+            [0.3, 0.2],
+            [0.7, 0.5],
+            [1.0, 0.8],
+        ]
+        lipid_trace = go.Volume(
+            x=x1.flatten(),
+            y=y1.flatten(),
+            z=z1.flatten(),
+            value=lp_masked.flatten(),
+            isomin=np.nanmin(lp_masked) if not np.isnan(lp_masked).all() else 0,
+            isomax=np.nanmax(lp_masked) if not np.isnan(lp_masked).all() else 1,
+            opacityscale=opacityscale,
+            surface_count=surface_count,
+            colorscale=colorscale,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+        )
+        data_traces.append(lipid_trace)
+
+        # --- 5) Build figure ---
+        fig = go.Figure(data=data_traces)
+        fig.update_layout(
+            margin=dict(t=0, r=0, b=0, l=0),
+            scene=dict(
+                xaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                yaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                zaxis=dict(showticklabels=True, showgrid=True, zeroline=False,
+                           backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(255,255,255,0.1)"),
+                aspectmode="data",
+            ),
+            template="plotly_dark",
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+
+        # --- 6) Cleanup ---
+        del lp, lp_masked, x1, y1, z1
+        gc.collect()
+
+        return fig
