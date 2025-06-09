@@ -1,15 +1,3 @@
-"""
-Clustering module for EUCLID.
-This module performs:
-  - Conventional Leiden clustering on harmonized NMF embeddings.
-  - A self-supervised, locally enhanced hierarchical (Euclid) clustering.
-  - Assignment of colors to clusters.
-  - Application of the learnt clustering tree to new data.
-  - Anatomical naming of clusters and generation of cluster inspection PDFs.
-  
-All functions work on an AnnData object produced by the embedding module.
-"""
-
 import os
 import pickle
 import warnings
@@ -79,7 +67,7 @@ class Node:
         self.scaler = None
         self.nmf = None
         self.xgb_model = None
-        self.feature_importances = None  # feature importances at the split
+        self.feature_importances = None 
         self.children = {}
         self.factors_to_use = None
 
@@ -159,9 +147,7 @@ class Clustering:
 
             self.adatamaia.obsm['X_TSNE'] = emb.adata.obsm['X_TSNE']
 
-    # -------------------------------------------------------------------------
-    # BLOCK 1: Conventional Leiden clustering on harmonized NMF embeddings
-    # -------------------------------------------------------------------------
+
     def leiden_nmf(self, use_reference_only=True, resolution=1.0, key_added="X_Leiden"):
         """
         Perform conventional Leiden clustering on the harmonized NMF embeddings.
@@ -503,11 +489,66 @@ class Clustering:
 
         Parameters
         ----------
+        K : int, optional
+            Number of clusters for initial KMeans clustering. Default is 60.
+        min_voxels : int, optional
+            Minimum number of voxels required for a valid split. Default is 150.
+        min_diff_lipids : int, optional
+            Minimum number of differentially expressed lipids required for a valid split. Default is 2.
+        min_fc : float, optional
+            Minimum fold change threshold for differential lipid analysis. Default is 0.2.
+        pthr : float, optional
+            P-value threshold for differential lipid analysis. Default is 0.05.
+        thr_signal : float, optional
+            Signal threshold for filtering low-signal components. Default is 1e-10.
+        penalty1 : float, optional
+            Penalty factor for previous-level embeddings. Default is 1.5.
+        penalty2 : float, optional
+            Penalty factor for global embeddings. Default is 2.0.
+        ACCTHR : float, optional
+            Minimum accuracy threshold for XGBoost classifier. Default is 0.6.
+        max_depth : int, optional
+            Maximum depth of the clustering tree. Default is 15.
+        ds_factor : int, optional
+            Downsampling factor for the dataset. Default is 1.
+        spat_columns : list, optional
+            Column names for spatial coordinates. Default is ['zccf','yccf','Section'].
+        min_val_threshold : int, optional
+            Minimum section-count threshold for continuity check. Default is 10.
+        min_nonzero_sections : int, optional
+            Minimum number of nonzero sections required for continuity. Default is 3.
+        gaussian_sigma : float, optional
+            Sigma parameter for Gaussian smoothing in continuity check. Default is 1.8.
+        default_peak_ratio : float, optional
+            Default peak ratio if fewer than 2 peaks are found. Default is 10.
+        peak_count_threshold : int, optional
+            Maximum number of peaks allowed for a valid split. Default is 3.
+        peak_ratio_threshold : float, optional
+            Minimum ratio between top peaks for a valid split. Default is 1.4.
+        combinations : int, optional
+            Maximum number of component combinations to try. Default is 200.
+        xgb_n_estimators : int, optional
+            Number of estimators for XGBoost classifier. Default is 1000.
+        xgb_max_depth : int, optional
+            Maximum depth for XGBoost classifier. Default is 8.
+        xgb_learning_rate : float, optional
+            Learning rate for XGBoost classifier. Default is 0.02.
+        xgb_subsample : float, optional
+            Subsample ratio for XGBoost classifier. Default is 0.8.
+        xgb_colsample_bytree : float, optional
+            Column sample ratio for XGBoost classifier. Default is 0.8.
+        xgb_gamma : float, optional
+            Minimum loss reduction for XGBoost classifier. Default is 0.5.
+        xgb_random_state : int, optional
+            Random state for XGBoost classifier. Default is 42.
+        xgb_n_jobs : int, optional
+            Number of parallel jobs for XGBoost classifier. Default is 6.
+        early_stopping_rounds : int, optional
+            Number of rounds for early stopping in XGBoost. Default is 7.
         plot_dir : str, optional
             Directory to save the clustering plots. Default is "clustering_plots".
         do_plotting : bool, optional
             Whether to generate and save plots during clustering. Default is False.
-        (all other parameters as before)
 
         Returns
         -------
@@ -921,7 +962,18 @@ class Clustering:
 
         Parameters
         ----------
-        (all parameters as before)
+        root_node : Node
+            The root node of a previously learned hierarchical clustering tree.
+        adata_new : sc.AnnData
+            New AnnData object to apply the clustering to.
+        standardized_global_new : pd.DataFrame
+            Precomputed standardized global embeddings for the new data.
+        penalty1 : float, optional
+            Penalty factor for previous-level embeddings. Default is 1.5.
+        penalty2 : float, optional
+            Penalty factor for global embeddings. Default is 2.0.
+        ds_factor : int, optional
+            Downsampling factor for the dataset. Default is 1.
 
         Returns
         -------
@@ -1014,14 +1066,6 @@ class Clustering:
         print("ciao")
         return paths_df
 
-
-
-
-
-    
-    # -------------------------------------------------------------------------
-    # BLOCK 3: Assign colors to clusters based on spatial embedding (for visualization)
-    # -------------------------------------------------------------------------
     def assign_cluster_colors(self, tree):
         """
         Compute a color assignment for lipizones (clusters) based on the hierarchy of splits.
@@ -1144,12 +1188,7 @@ class Clustering:
         dd2['lipizone_color'] = dd2.apply(lambda row: rgb_to_hex(row['R'], row['G'], row['B']), axis=1)
         
         self.adata.obs['lipizone_color'] = dd2['lipizone_color'].values
-    
 
-
-    # -------------------------------------------------------------------------
-    # BLOCK 5: Assign a name to each cluster based on anatomical localization.
-    # -------------------------------------------------------------------------
     def name_lipizones_anatomy(self, acronym_column, lipizone_column):
         """
         Assign anatomical names to clusters based on the cross-tabulation of acronyms and lipizone labels.
@@ -1231,9 +1270,6 @@ class Clustering:
             mask = lipizone_series == lipizone_value
             self.adata.obs.loc[mask, 'lipizone_names'] = name
 
-    # -------------------------------------------------------------------------
-    # BLOCK 6: Plot each cluster to separate PDF files for inspection.
-    # -------------------------------------------------------------------------
     def clean_corrupted_pdfs(self, output_folder=None):
         """
         Clean up any corrupted PDF files in the output folder.
@@ -1431,8 +1467,6 @@ class Clustering:
         ----------
         clusteringLOG : pd.DataFrame
             DataFrame containing clustering results with columns for each level.
-        adata : sc.AnnData
-            AnnData object to add the clustering results to.
             
         Returns
         -------
@@ -1457,6 +1491,9 @@ class Clustering:
         for level in required_levels:
             if level not in clusteringLOG.columns:
                 clusteringLOG[level] = np.nan
+
+        for lvl in ['level_1','level_2','level_3','level_4','level_5','level_6']:
+            clusteringLOG[lvl] = clusteringLOG[lvl].astype(int).fillna(0)
                 
         # Compute class (first 3 levels)
         clusteringLOG['class'] = clusteringLOG['level_1'].astype(str) + \
@@ -1469,7 +1506,7 @@ class Clustering:
                                    clusteringLOG['level_3'].astype(str) + \
                                    clusteringLOG['level_4'].astype(str) + \
                                    clusteringLOG['level_5'].astype(str) + \
-                                   clusteringLOG['level_6'].astype(str)
+                                   clusteringLOG['level_6'].astype(str) + ".0"
                                    
         # Set cluster equal to lipizone
         clusteringLOG['cluster'] = clusteringLOG['lipizone']
@@ -1536,9 +1573,7 @@ class Clustering:
         if len(unmapped_lipizones) > 0:
             print(f"Unmapped lipizones: {unmapped_lipizones}")
 
-    # -------------------------------------------------------------------------
-    # BLOCK 7: Basic plotting functions for lipizone analysis
-    # -------------------------------------------------------------------------
+
     def plot_distribution_of_pixels_per_lipizone(self, figsize=(12, 6)):
         """
         Plot the distribution of number of pixels per lipizone as a histogram.

@@ -18,25 +18,8 @@ import re
 warnings.filterwarnings('ignore')
 
 class Preprocessing:
-    """
-    A class encapsulating all preprocessing steps (Blocks 1-9) for MSI data.
-    Each method corresponds to a specific BLOCK in the original snippets.
-    
-    Parameters
-    ----------
-    analysis_name : str, optional
-        Prefix for all output files. Default is "analysis".
-    """
     
     def __init__(self, analysis_name="analysis"):
-        """
-        Initialize the Preprocessing class.
-        
-        Parameters
-        ----------
-        analysis_name : str, optional
-            Prefix for all output files. Default is "analysis".
-        """
         self.analysis_name = analysis_name
         self.adata = None
 
@@ -82,7 +65,7 @@ class Preprocessing:
         features = np.sort(list(root.group_keys()))[:n_molecules]
         masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
         
-        n_acquisitions = len(acquisitions) # FIXXXX HERE I SHOULD BETTER CALL ACQUISITIONS BY NAME EG PROTOTYPING ON SUBSET
+        n_acquisitions = len(acquisitions)
         accqn_num = np.arange(n_acquisitions)
         
         morans_by_sec = pd.DataFrame(
@@ -130,7 +113,7 @@ class Preprocessing:
 
         Parameters
         ----------
-        path_data : str, optional
+        path_data : str
             Path to the uMAIA Zarr dataset.
         acquisitions : list of str, optional
             List of acquisitions/sections to process.
@@ -201,7 +184,6 @@ class Preprocessing:
         metadata = pd.read_csv(metadata_csv)
         df_transposed = df_transposed.merge(metadata, on='SectionID', how='left')
         df_transposed.index = "ind" + df_transposed.index.astype(str)
-        # what broke the adata querying by name was this, which is the correct filter but somehow (no idea how) breaks the adata querying by name
         mask = df_transposed.loc[:, features].mean(axis=1) <= 0.00011
         df_transposed = df_transposed.loc[mask == False, :]
         print(df_transposed.shape)
@@ -294,13 +276,6 @@ class Preprocessing:
                 # Map values using the composite key
                 self.adata.obs[col] = adata_key.map(value_map)
                 
-        # Print some debugging information
-        print(f"Number of observations after filtering: {len(self.adata.obs)}")
-        if 'allencolor' in self.adata.obs.columns:
-            print("\nUnique allencolor values:")
-            print(self.adata.obs['allencolor'].value_counts().head())
-            print(f"\nNumber of NaN values in allencolor: {self.adata.obs['allencolor'].isna().sum()}")
-
     def filter_by_metadata(self, column: str, operation: str) -> sc.AnnData:
         """
         Filter the AnnData object based on a condition specified on a metadata column.
@@ -501,16 +476,19 @@ class Preprocessing:
         except:
             pass
 
-        # Plot histogram of all ppm values (LIPIDMAPS and USER if available)
-        all_ppms = pd.Series(peaks_df['ppm_USER'], name='ppm_USER')
-        all_ppms = pd.DataFrame(all_ppms).melt(value_name='ppm')['ppm'].dropna()
-        plt.figure(figsize=(7,4))
-        plt.hist(all_ppms, bins=50, color='dodgerblue', alpha=0.7)
-        plt.xlabel('ppm error')
-        plt.ylabel('Count')
-        plt.title('Distribution of ppm errors (LIPIDMAPS and USER)')
-        plt.tight_layout()
-        plt.show()
+        try:
+            # Plot histogram of ppm values using the user's annotation if available
+            all_ppms = pd.Series(peaks_df['ppm_USER'], name='ppm_USER')
+            all_ppms = pd.DataFrame(all_ppms).melt(value_name='ppm')['ppm'].dropna()
+            plt.figure(figsize=(7,4))
+            plt.hist(all_ppms, bins=50, color='dodgerblue', alpha=0.7)
+            plt.xlabel('ppm error')
+            plt.ylabel('Count')
+            plt.title('Distribution of ppm errors')
+            plt.tight_layout()
+            plt.show()
+        except:
+            pass
 
         return peaks_df
 
@@ -544,7 +522,7 @@ class Preprocessing:
             Updated annotation table with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
         """
         lcms_data = pd.read_csv(lcms_csv)
-        lcms_data = lcms_data.set_index(lcms_data.columns[0])  # Assume first column is lipid name
+        lcms_data = lcms_data.set_index(lcms_data.columns[0]) 
 
         peaks_df = matched_table.copy()
         peaks_df['AnnotationLCMSPrioritized'] = peaks_df[annotation_col]
@@ -618,7 +596,7 @@ class Preprocessing:
         print(acqn)
         acquisitions = acquisitions['acqpath'].values
         print(acquisitions)
-        masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
+        masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions] #####################
         
         n_acquisitions = len(acquisitions)
         accqn_num = np.arange(n_acquisitions)
@@ -732,88 +710,88 @@ class Preprocessing:
         adata = sc.read_h5ad(filename)
         self.adata = adata
 
-    def prioritize_adducts(
-        self,
-        path_data,
-        acquisitions,
-        annotation_to_mz,
-        output_csv=None
-    ):
-        """
-        Prioritize adducts by total signal across sections.
+    # def prioritize_adducts(
+    #     self,
+    #     path_data,
+    #     acquisitions,
+    #     annotation_to_mz,
+    #     output_csv=None
+    # ):
+    #     """
+    #     Prioritize adducts by total signal across sections.
 
-        Parameters
-        ----------
-        path_data : str, optional
-            Path to the Zarr dataset.
-        acquisitions : list of str
-            List of acquisitions.
-        annotation_to_mz : dict
-            Dictionary mapping annotation -> list of candidate m/z values.
-        output_csv : str, optional
-            Path to save the dictionary of best adduct to CSV.
-            If None, defaults to "{analysis_name}_prioritized_adducts.csv".
+    #     Parameters
+    #     ----------
+    #     path_data : str, optional
+    #         Path to the Zarr dataset.
+    #     acquisitions : list of str
+    #         List of acquisitions.
+    #     annotation_to_mz : dict
+    #         Dictionary mapping annotation -> list of candidate m/z values.
+    #     output_csv : str, optional
+    #         Path to save the dictionary of best adduct to CSV.
+    #         If None, defaults to "{analysis_name}_prioritized_adducts.csv".
 
-        Returns
-        -------
-        dict
-            A dictionary mapping each annotation to its best m/z value.
-        """
+    #     Returns
+    #     -------
+    #     dict
+    #         A dictionary mapping each annotation to its best m/z value.
 
-        if output_csv is None:
-            output_csv = f"{self.analysis_name}_prioritized_adducts.csv"
 
-        acqn = acquisitions['acqn'].values
-        acquisitions = acquisitions['acqpath'].values
+    #     if output_csv is None:
+    #         output_csv = f"{self.analysis_name}_prioritized_adducts.csv"
+
+    #     acqn = acquisitions['acqn'].values
+    #     acquisitions = acquisitions['acqpath'].values
         
-        root = zarr.open(path_data, mode='r')
-        features = np.sort(list(root.group_keys()))
-        masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
+    #     root = zarr.open(path_data, mode='r')
+    #     features = np.sort(list(root.group_keys()))
+    #     masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
         
-        n_acquisitions = len(acquisitions) # FIXXXX HERE I SHOULD BETTER CALL ACQUISITIONS BY NAME EG PROTOTYPING ON SUBSET
-        accqn_num = np.arange(n_acquisitions)
+    #     n_acquisitions = len(acquisitions) # FIXXXX HERE I SHOULD BETTER CALL ACQUISITIONS BY NAME EG PROTOTYPING ON SUBSET
+    #     accqn_num = np.arange(n_acquisitions)
         
-        totsig_df = pd.DataFrame(
-            np.zeros((len(features), n_acquisitions)), 
-            index=features, 
-            columns=acqn.astype(str)
-        )
+    #     totsig_df = pd.DataFrame(
+    #         np.zeros((len(features), n_acquisitions)), 
+    #         index=features, 
+    #         columns=acqn.astype(str)
+    #     )
 
-        for feat in tqdm(features, desc="Computing total signal"):
-            feat_dec = f"{float(feat):.6f}"
-            for j, j1 in zip(acqn, accqn_num):
-                image = np.exp(root[feat_dec][str(j)][:])
-                mask = masks[j1]
-                image[mask == 0] = 0
-                sig = np.mean(image * 1e6)
-                totsig_df.loc[feat, str(j)] = sig
+    #     for feat in tqdm(features, desc="Computing total signal"):
+    #         feat_dec = f"{float(feat):.6f}"
+    #         for j, j1 in zip(acqn, accqn_num):
+    #             image = np.exp(root[feat_dec][str(j)][:])
+    #             mask = masks[j1]
+    #             image[mask == 0] = 0
+    #             sig = np.mean(image * 1e6)
+    #             totsig_df.loc[feat, str(j)] = sig
 
-        totsig_df = totsig_df.fillna(0)
-        featuresum = totsig_df.sum(axis=1)
+    #     totsig_df = totsig_df.fillna(0)
+    #     featuresum = totsig_df.sum(axis=1)
 
-        annotation_to_mz_bestadduct = {}
-        for annotation, mz_values in annotation_to_mz.items():
-            max_featuresum = -float('inf')
-            best_mz = None
+    #     annotation_to_mz_bestadduct = {}
+    #     for annotation, mz_values in annotation_to_mz.items():
+    #         max_featuresum = -float('inf')
+    #         best_mz = None
 
-            for mz_value in mz_values:
-                if mz_value in featuresum.index:
-                    val = featuresum.loc[mz_value]
-                    if val > max_featuresum:
-                        max_featuresum = val
-                        best_mz = mz_value
-                else:
-                    print(f"m/z value {mz_value} not found in featuresum index.")
+    #         for mz_value in mz_values:
+    #             if mz_value in featuresum.index:
+    #                 val = featuresum.loc[mz_value]
+    #                 if val > max_featuresum:
+    #                     max_featuresum = val
+    #                     best_mz = mz_value
+    #             else:
+    #                 print(f"m/z value {mz_value} not found in featuresum index.")
 
-            if best_mz is not None:
-                annotation_to_mz_bestadduct[annotation] = best_mz
-            else:
-                print(f"No valid m/z values found for annotation {annotation}.")
+    #         if best_mz is not None:
+    #             annotation_to_mz_bestadduct[annotation] = best_mz
+    #         else:
+    #             print(f"No valid m/z values found for annotation {annotation}.")
 
-        # Optionally save the results
-        pd.DataFrame.from_dict(annotation_to_mz_bestadduct, orient='index').to_csv(output_csv)
-        totsig_df.to_csv(f"{self.analysis_name}_totsig_df_" + os.path.basename(output_csv))
-        return annotation_to_mz_bestadduct, totsig_df
+    #     # Optionally save the results
+    #     pd.DataFrame.from_dict(annotation_to_mz_bestadduct, orient='index').to_csv(output_csv)
+    #     totsig_df.to_csv(f"{self.analysis_name}_totsig_df_" + os.path.basename(output_csv))
+    #     return annotation_to_mz_bestadduct, totsig_df
 
     def feature_selection(
         self,
@@ -855,9 +833,7 @@ class Preprocessing:
         
         Returns
         -------
-        sc.AnnData
-            A new AnnData object that is subset to the selected features, with an annotation of the 
-            feature selection scores stored in .uns["feature_selection_scores"].
+        Subsets in place moving the peaks to another slot
         """
         from sklearn.preprocessing import StandardScaler
         from sklearn.cluster import KMeans
