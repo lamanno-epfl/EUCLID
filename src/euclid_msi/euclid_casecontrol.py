@@ -37,6 +37,7 @@ from scipy.cluster import hierarchy as sch
 from matplotlib.colors import ListedColormap, to_rgba
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import networkx as nx
+from typing import List, Optional, Tuple
 
 CASECONTROL_DIR = Path(os.getcwd()) / "casecontrol_analysis"
 CASECONTROL_DIR.mkdir(exist_ok=True)
@@ -1030,7 +1031,7 @@ def analyze_lipids(lipids, config, sub_alldata, subsample, testset):
         
         # Save model state (optional)
         final_params = svi.get_params(svi_state)
-        np.save(f"{lipid_name}_model_params.npy", final_params)
+        np.save(str(PDF_DIR / f"{lipid_name}_model_params.npy"), final_params)
     
     return results
 
@@ -1186,6 +1187,10 @@ class CaseControlAnalysis:
         """
         self.adata = adata
         self.analysis_name = analysis_name
+        # Set unified output directory
+        self.casecontrol_dir = Path(os.getcwd()) / f"casecontrol_analysis_{self.analysis_name}"
+        self.casecontrol_dir.mkdir(exist_ok=True)
+        self.PDF_DIR = self.casecontrol_dir
     
     def run_case_control_analysis(
         self,
@@ -1211,23 +1216,26 @@ class CaseControlAnalysis:
         verbose=True
     ):
         """
-        Run case-control analysis on an AnnData object and save all outputs to 'casecontrol_analysis'.
+        Run case-control analysis on an AnnData object and save all outputs to the unified folder.
         """
         import pandas as pd
-        # Extract obs and relevant columns
         obs = self.adata.obs.copy()
-        # Extract lipid intensities (assume adata.var_names matches columns in adata.X)
         lipid_df = pd.DataFrame(self.adata.X, columns=self.adata.var_names, index=self.adata.obs_names)
-        # Merge obs and lipid intensities
         df = pd.concat([obs, lipid_df], axis=1)
-        # Check required columns
+        if supertype_col not in df.columns:
+            level_cols = [col for col in df.columns if col.startswith('level_')]
+            if not level_cols:
+                raise ValueError("No level columns found in AnnData.obs to create supertype.")
+            level_cols = sorted(level_cols)
+            max_level = min(8, len(level_cols))
+            level_cols = level_cols[:max_level]
+            df[supertype_col] = df[level_cols].apply(lambda x: '_'.join(x.astype(str).values), axis=1)
+            print(f"Created supertype column from levels: {', '.join(level_cols)}")
         for col in [x_col, y_col, sectionid_col, sample_col, condition_col, supertype_col]:
             if col not in df.columns:
                 raise ValueError(f"Required column '{col}' not found in AnnData.obs.")
-        # Prepare coords DataFrame for spatial splitting
         coords = df[[x_col, y_col, sectionid_col]].copy()
         coords.columns = ["x", "y", "SectionID"]
-        # Prepare config object
         class Config:
             pass
         config = Config()
@@ -1244,54 +1252,54 @@ class CaseControlAnalysis:
         config.normalize_percentiles = normalize_percentiles
         config.guide_supertype_unconst_scale = guide_supertype_unconst_scale
         config.guide_supertype_susceptibility_scale = guide_supertype_susceptibility_scale
-        # Patch global config reference if needed
         global CASECONTROL_DIR
         global PDF_DIR
-        CASECONTROL_DIR = Path(os.getcwd()) / f"{self.analysis_name}_casecontrol_analysis"
-        CASECONTROL_DIR.mkdir(exist_ok=True)
-        PDF_DIR = CASECONTROL_DIR
-        # Run main analysis
+        CASECONTROL_DIR = self.casecontrol_dir
+        PDF_DIR = self.casecontrol_dir
         results = main(df, coords, config)
         if verbose:
-            print(f"All outputs saved to: {CASECONTROL_DIR}")
+            print(f"All outputs saved to: {self.casecontrol_dir}")
         return results
 
     def summarize_case_control_results(
         self,
-        lipids_to_analyze,
-        supertypes=None,
-        model_dir=None,
-        normalize_percentiles=(0.1, 99.9),
-        output_prefix="pregnancy"
-    ):
-        """
-        Summarize case-control model results for a set of lipids and supertypes.
-        Saves shift, baseline, and foldchange as parquet files in the casecontrol_analysis directory.
-        """
-        import numpy as np
-        import pandas as pd
+        lipids_to_analyze: List[str],
+        supertypes: Optional[List[str]] = None,
+        model_dir: Optional[str] = None,
+        normalize_percentiles: Optional[Tuple[float, float]] = None,
+        output_prefix: Optional[str] = None,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Summarize case-control analysis results for specific lipids and supertypes."""
         from pathlib import Path
-
+        if 'supertype' not in self.adata.obs.columns:
+            level_cols = [col for col in self.adata.obs.columns if col.startswith('level_')]
+            if not level_cols:
+                raise ValueError("No level columns found in AnnData.obs to create supertype.")
+            level_cols = sorted(level_cols)
+            max_level = min(8, len(level_cols))
+            level_cols = level_cols[:max_level]
+            self.adata.obs['supertype'] = self.adata.obs[level_cols].apply(
+                lambda x: '_'.join(x.astype(str).values), axis=1
+            )
+            print(f"Created supertype column from levels: {', '.join(level_cols)}")
         if supertypes is None:
             supertypes = np.sort(self.adata.obs['supertype'].unique())
+        # Use the unified output directory by default
         if model_dir is None:
-            model_dir = CASECONTROL_DIR
+            model_dir = Path(self.casecontrol_dir)
         else:
             model_dir = Path(model_dir)
         aaaa_list, bbbb_list, lipid_names = [], [], []
-
-        for lipid in tqdm(lipids_to_analyze):
+        for lipid in lipids_to_analyze:
             param_path = model_dir / f"{lipid}_model_params.npy"
             if not param_path.exists():
                 print(f"Warning: {param_path} not found, skipping.")
                 continue
             params = np.load(param_path, allow_pickle=True).item()
-            # Baseline: sigmoid of unconst
             baseline = pd.DataFrame(
                 sigmoid(params['alpha_supertype_unconst_loc']),
                 index=supertypes, columns=[lipid]
             )
-            # Shift: susceptibility
             shift = pd.DataFrame(
                 params['alpha_supertype_susceptibility_loc'],
                 index=supertypes, columns=[lipid]
@@ -1299,21 +1307,20 @@ class CaseControlAnalysis:
             aaaa_list.append(shift)
             bbbb_list.append(baseline)
             lipid_names.append(lipid)
-
-        # Concatenate across lipids
+        if not aaaa_list:
+            raise ValueError("No valid model parameters found. Please ensure you have run run_case_control_analysis with the specified lipids before calling summarize_case_control_results.")
         shift_df = pd.concat(aaaa_list, axis=1)
         baseline_df = pd.concat(bbbb_list, axis=1)
         shift_df.columns = lipid_names
         baseline_df.columns = lipid_names
-
-        # Compute fold change
         foldchange_df = shift_df / baseline_df
-
-        # Save results
+        # Save results in the unified output directory
         shift_df.to_parquet(model_dir / f"shift_{output_prefix}.parquet")
         baseline_df.to_parquet(model_dir / f"baseline_{output_prefix}.parquet")
         foldchange_df.to_parquet(model_dir / f"foldchange_{output_prefix}.parquet")
-
+        shift_df.to_csv(model_dir / f"shift_{output_prefix}.csv")
+        baseline_df.to_csv(model_dir / f"baseline_{output_prefix}.csv")
+        foldchange_df.to_csv(model_dir / f"foldchange_{output_prefix}.csv")
         print(f"Saved shift, baseline, and foldchange to {model_dir}")
         return shift_df, baseline_df, foldchange_df
 
@@ -1340,12 +1347,13 @@ class CaseControlAnalysis:
         from pathlib import Path
         from scipy.special import expit
 
+        # Use the unified output directory by default
+        if model_dir is None:
+            model_dir = self.casecontrol_dir
+        model_dir = Path(model_dir)
+
         if supertypes is None:
             supertypes = np.sort(self.adata.obs['supertype'].unique())
-        if model_dir is None:
-            model_dir = CASECONTROL_DIR
-        else:
-            model_dir = Path(model_dir)
 
         lipid_upreg_xsupertypes = []
         lipid_downreg_xsupertypes = []
@@ -1390,13 +1398,20 @@ class CaseControlAnalysis:
         lipid_upreg_xsupertypes_df = pd.DataFrame(lipid_upreg_xsupertypes, columns=stindex, index=lipid_names)
         lipid_downreg_xsupertypes_df = pd.DataFrame(lipid_downreg_xsupertypes, columns=stindex, index=lipid_names)
         lipid_expressed_xsupertypes_df = pd.DataFrame(lipid_expressed_xsupertypes, columns=stindex, index=lipid_names)
-        shifted_xsupertypes_df = lipid_upreg_xsupertypes_df | lipid_downreg_xsupertypes_df
+        
+        # Convert to boolean before OR operation
+        shifted_xsupertypes_df = (lipid_upreg_xsupertypes_df.astype(bool) | lipid_downreg_xsupertypes_df.astype(bool))
 
-        # Save results
+        # Save results in the unified output directory
         lipid_upreg_xsupertypes_df.to_parquet(model_dir / f"upreg_xsupertypes_{output_prefix}.parquet")
         lipid_downreg_xsupertypes_df.to_parquet(model_dir / f"downreg_xsupertypes_{output_prefix}.parquet")
         lipid_expressed_xsupertypes_df.to_parquet(model_dir / f"expressed_xsupertypes_{output_prefix}.parquet")
         shifted_xsupertypes_df.to_parquet(model_dir / f"shifted_xsupertypes_{output_prefix}.parquet")
+        # Also save as CSV for convenience
+        lipid_upreg_xsupertypes_df.to_csv(model_dir / f"upreg_xsupertypes_{output_prefix}.csv")
+        lipid_downreg_xsupertypes_df.to_csv(model_dir / f"downreg_xsupertypes_{output_prefix}.csv")
+        lipid_expressed_xsupertypes_df.to_csv(model_dir / f"expressed_xsupertypes_{output_prefix}.csv")
+        shifted_xsupertypes_df.to_csv(model_dir / f"shifted_xsupertypes_{output_prefix}.csv")
 
         print(f"Saved upreg, downreg, expressed, and shifted xsupertypes to {model_dir}")
 
@@ -1405,8 +1420,8 @@ class CaseControlAnalysis:
         ci_lowers = []
         ci_uppers = []
         for yyy in tqdm(range(lipid_expressed_xsupertypes_df.shape[0])):
-            exp = lipid_expressed_xsupertypes_df.iloc[yyy, :].values
-            shif = shifted_xsupertypes_df.iloc[yyy, :].values
+            exp = lipid_expressed_xsupertypes_df.iloc[yyy, :].values.astype(bool)
+            shif = shifted_xsupertypes_df.iloc[yyy, :].values.astype(bool)
             n, B = len(exp), 10000
             rng = np.random.default_rng(42)
             # Bootstrap replicates
@@ -1443,19 +1458,47 @@ class CaseControlAnalysis:
         todrop_lipids=None,
         k_row=16,
         thresh=0.5,
+        threshold=None,  # Add threshold parameter for backward compatibility
         output_filename=None,
         figsize=(16, 10)
     ):
         """
         Create a comprehensive comodulation heatmap showing log2 fold changes with optimal leaf ordering.
         
-        This function takes the shifts and baseline data from case-control analysis and creates
-        a sophisticated visualization with multiple sidebars showing:
-        - Subclass colors  
-        - Row clusters
-        - Lipid class colors (top)
-        - Nonzero count bar plot (right)
+        Parameters
+        ----------
+        shift : pd.DataFrame
+            DataFrame of shifts
+        baseline : pd.DataFrame
+            DataFrame of baseline values
+        expressed : pd.DataFrame
+            DataFrame of expressed values
+        shifted : pd.DataFrame
+            DataFrame of shifted values
+        ddf : pd.DataFrame
+            DataFrame with lipid properties
+        baseline_condition : str, optional
+            Name of baseline condition, by default "naive"
+        supertype_col : str, optional
+            Name of supertype column, by default "supertype"
+        todrop_supertypes : list, optional
+            List of supertypes to drop, by default None
+        todrop_lipids : list, optional
+            List of lipids to drop, by default None
+        k_row : int, optional
+            Number of row clusters, by default 16
+        thresh : float, optional
+            Threshold for dense rows/columns, by default 0.5
+        threshold : float, optional
+            Alias for thresh, by default None
+        output_filename : str, optional
+            Name of output file, by default None
+        figsize : tuple, optional
+            Figure size, by default (16, 10)
         """
+        # Use threshold if provided, otherwise use thresh
+        thresh = threshold if threshold is not None else thresh
+        
         if output_filename is None:
             output_filename = f"{self.analysis_name}_overview_pregnancy_shifts.pdf"
         
@@ -1934,6 +1977,153 @@ class CaseControlAnalysis:
         plt.savefig(output_filename)
         plt.show()
 
+    def differential_lipids(
+        self,
+        samples_to_keep: list,
+        group_col: str,
+        group1: str,
+        group2: str,
+        lipid_props_df: pd.DataFrame,
+        min_fc: float = 0.2,
+        pthr: float = 0.05,
+        show_inline: bool = True,
+        output_filename: str = None
+    ) -> pd.DataFrame:
+        """
+        Perform differential testing between two groups for lipids in the AnnData object.
+        
+        Parameters
+        ----------
+        samples_to_keep : list
+            List of sample names to include in the analysis
+        group_col : str
+            Column name in adata.obs to use for grouping ('acronym', 'lipizone', or 'level_x')
+        group1 : str
+            First group label to compare
+        group2 : str
+            Second group label to compare
+        lipid_props_df : pd.DataFrame
+            DataFrame containing lipid properties including colors
+        min_fc : float, optional
+            Minimum fold change threshold, by default 0.2
+        pthr : float, optional
+            P-value threshold for significance, by default 0.05
+        show_inline : bool, optional
+            Whether to show the plot inline, by default True
+        output_filename : str, optional
+            Output filename for the plot, by default None (uses analysis_name prefix)
+            
+        Returns
+        -------
+        pd.DataFrame
+            Results of differential testing with log2 fold changes and p-values
+        """
+        import numpy as np
+        from scipy.stats import mannwhitneyu
+        from statsmodels.stats.multitest import multipletests
+        from adjustText import adjust_text
+        import matplotlib.pyplot as plt
+        
+        # Filter data to keep only specified samples
+        mask = self.adata.obs['Sample'].isin(samples_to_keep)
+        adata_subset = self.adata[mask].copy()
+        
+        # Create boolean masks for the two groups
+        mask1 = adata_subset.obs[group_col] == group1
+        mask2 = adata_subset.obs[group_col] == group2
+        
+        # Extract lipid data
+        lipid_data = pd.DataFrame(
+            adata_subset.X,
+            columns=adata_subset.var_names,
+            index=adata_subset.obs_names
+        )
+        
+        # Subset the data into two groups
+        groupA = lipid_data.loc[mask1]
+        groupB = lipid_data.loc[mask2]
+        
+        results = []
+        for col_name in lipid_data.columns:
+            dataA = groupA[col_name].dropna()
+            dataB = groupB[col_name].dropna()
+            
+            # Compute group means and log2 fold change
+            meanA = np.mean(dataA) + 1e-11  # avoid division by zero
+            meanB = np.mean(dataB) + 1e-11
+            log2fc = np.log2(meanB / meanA)
+            
+            # Mann-Whitney U test
+            try:
+                _, pval = mannwhitneyu(dataA, dataB, alternative='two-sided')
+            except ValueError:
+                # Occurs if one group is all identical values, etc.
+                pval = np.nan
+            
+            results.append({
+                'lipid': col_name,
+                'meanA': meanA,
+                'meanB': meanB,
+                'log2fold_change': log2fc,
+                'p_value': pval
+            })
+        
+        results_df = pd.DataFrame(results)
+        
+        # Multiple-testing correction
+        reject, pvals_corrected, _, _ = multipletests(
+            results_df['p_value'].values,
+            alpha=pthr,
+            method='fdr_bh'
+        )
+        results_df['p_value_corrected'] = pvals_corrected
+        
+        # Create visualization
+        if output_filename is None:
+            output_filename = f"{self.analysis_name}_differential_lipids.pdf"
+            
+        # Filter significant results and sort
+        dfff = results_df.loc[results_df['p_value_corrected'] < pthr].sort_values(by="log2fold_change")
+        colors = lipid_props_df.loc[dfff['lipid'], 'color'].fillna("black")
+        
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(range(len(dfff)), dfff['log2fold_change'], color=colors)
+        
+        # Select indices to label
+        n_items = len(dfff)
+        bottom_5 = list(range(5))
+        top_5 = list(range(n_items-5, n_items))
+        middle_start = 5
+        middle_end = n_items - 5
+        middle_5 = list(np.random.choice(range(middle_start, middle_end), 5, replace=False))
+        indices_to_label = sorted(bottom_5 + middle_5 + top_5)
+        
+        # Add labels
+        texts = []
+        for idx in indices_to_label:
+            x = idx
+            y = dfff.iloc[idx]['log2fold_change']
+            texts.append(plt.text(x, y, dfff.iloc[idx]['lipid'], fontsize=8))
+        
+        # Adjust text positions to avoid overlap
+        adjust_text(texts)
+        
+        # Clean up plot
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        plt.xlabel("Sorted lipid species")
+        plt.xticks([])
+        plt.tight_layout()
+        
+        if output_filename:
+            plt.savefig(output_filename)
+        if show_inline:
+            plt.show()
+        else:
+            plt.close()
+            
+        return results_df
+
 # Helper functions (standalone utilities)
 def cosine_clean(u, v):
     """
@@ -1954,52 +2144,81 @@ def cosine_clean(u, v):
 
 def optimal_reorder_dataframe_cosine_clean(df, method='weighted', thresh=0.8):
     """
-    1) Hold aside rows with >thresh fraction nonzero, and likewise for columns.
-    2) Cluster only the remaining "main" submatrix with our custom cosine_clean.
-    3) Reassemble a reordered df with held‐aside columns on the right, rows on the bottom.
+    Reorder a dataframe using optimal leaf ordering on cosine distances.
+    Handles empty dataframes and provides better error messages.
     """
-    n_rows, n_cols = df.shape
+    # Check if dataframe is empty
+    if df.empty:
+        raise ValueError("Input dataframe is empty. Please check your data and filtering criteria.")
     
-    # DEBUG: show the true per-row densities
-    row_frac = (df != 0).sum(axis=1) / n_cols
-    print(f"Using threshold = {thresh}")
-    print(f"Rows with frac > thresh: {(row_frac > thresh).sum()} / {n_rows}")
-    print("Those rows are:", list(row_frac[row_frac > thresh].index))
-
+    # Check if all values are zero or NaN
+    if df.isna().all().all() or (df == 0).all().all():
+        raise ValueError("All values in the dataframe are zero or NaN. Please check your data and filtering criteria.")
     
-    # 1) identify dense rows & columns
-    row_frac = (df != 0).sum(axis=1) / n_cols
-    col_frac = (df != 0).sum(axis=0) / n_rows
+    # 1) Identify dense rows and columns
+    row_frac = (df != 0).mean(axis=1)
+    col_frac = (df != 0).mean(axis=0)
+    
+    # Print fraction distribution for debugging
+    print(f"\nFraction distribution:")
+    print(f"Rows: min={row_frac.min():.3f}, 25%={row_frac.quantile(0.25):.3f}, median={row_frac.median():.3f}, 75%={row_frac.quantile(0.75):.3f}, max={row_frac.max():.3f}")
+    print(f"Columns: min={col_frac.min():.3f}, 25%={col_frac.quantile(0.25):.3f}, median={col_frac.median():.3f}, 75%={col_frac.quantile(0.75):.3f}, max={col_frac.max():.3f}")
+    
     rows_dense = row_frac > thresh
     cols_dense = col_frac > thresh
-
-    # main block for clustering
+    
+    # Check if we have any non-dense rows/columns
+    if not (~rows_dense).any() or not (~cols_dense).any():
+        raise ValueError(
+            f"No rows/columns have fraction <= {thresh}. "
+            f"Current fractions: rows [{row_frac.min():.3f}, {row_frac.max():.3f}], "
+            f"columns [{col_frac.min():.3f}, {col_frac.max():.3f}]. "
+            "Try increasing the threshold."
+        )
+    
+    # 2) Reorder main block
     df_main = df.loc[~rows_dense, ~cols_dense]
-
+    
+    # Check if main block is empty
+    if df_main.empty:
+        raise ValueError(
+            f"After filtering dense rows/columns (threshold={thresh}), no data remains. "
+            f"Current fractions: rows [{row_frac.min():.3f}, {row_frac.max():.3f}], "
+            f"columns [{col_frac.min():.3f}, {col_frac.max():.3f}]. "
+            "Try adjusting the threshold."
+        )
+    
     # 2a) column clustering on main
     col_d = pdist(df_main.T.values, metric=cosine_clean)
     col_L = sch.linkage(col_d, method=method, optimal_ordering=True)
     col_order = sch.leaves_list(col_L)
-
+    
     # 2b) row clustering on main
     row_d = pdist(df_main.values, metric=cosine_clean)
     row_L = sch.linkage(row_d, method=method, optimal_ordering=True)
     row_order = sch.leaves_list(row_L)
-
-    # labels in main
-    cols_main = df_main.columns.tolist()
-    rows_main = df_main.index.tolist()
-
-    # ordered labels in main
-    ordered_cols_main = [cols_main[i] for i in col_order]
-    ordered_rows_main = [rows_main[i] for i in row_order]
-
-    # 3) full ordering: main first, then dense ones
-    ordered_cols = ordered_cols_main + df.columns[cols_dense].tolist()
-    ordered_rows = ordered_rows_main + df.index[rows_dense].tolist()
-    df_reordered = df.loc[ordered_rows, ordered_cols]
-
-    return df_reordered, row_L, col_L, ordered_rows, ordered_cols, rows_dense, cols_dense, ordered_rows_main
+    
+    # 3) Reorder everything
+    ordered_rows = df_main.index[row_order].tolist()
+    ordered_cols = df_main.columns[col_order].tolist()
+    
+    # Add dense rows/columns at the end
+    ordered_rows.extend(df.index[rows_dense])
+    ordered_cols.extend(df.columns[cols_dense])
+    
+    # Reorder the full dataframe
+    df_opt = df.loc[ordered_rows, ordered_cols]
+    
+    return (
+        df_opt,
+        row_L,
+        col_L,
+        ordered_rows,
+        ordered_cols,
+        rows_dense,
+        cols_dense,
+        ordered_rows[:len(row_order)]
+    )
 
 
 def generate_distinct_colors(n):
@@ -2008,3 +2227,83 @@ def generate_distinct_colors(n):
         return plt.cm.tab20(np.linspace(0, 1, min(n, 20)))
     hues = np.linspace(0, 1, n, endpoint=False)
     return [plt.cm.hsv(h) for h in hues]
+
+# def traverse_and_diff(
+#     dat,
+#     lipid_data,
+#     levels,
+#     current_level=0,
+#     branch_path=None,
+#     min_fc=0.2,
+#     pthr=0.05,
+#     output_dir="diff_results"
+# ):
+#     """
+#     Recursively traverse the hierarchical labels in `dat`, perform differential analysis 
+#     (two-group comparison: val vs the rest) at each level, and save results for each split.
+    
+#     - dat: DataFrame containing hierarchical annotations (columns like 'level_1', 'level_2', ...).
+#            Row indices align with samples.
+#     - lipid_data: DataFrame with lipid measurements (same rows = samples, columns = lipids).
+#     - levels: list of the column names describing the hierarchy.
+#     - current_level: integer index into `levels`.
+#     - branch_path: keeps track of label choices so far (used for file naming).
+#     - min_fc, pthr: thresholds passed to `differential_lipids` (you can incorporate `min_fc` logic as needed).
+#     - output_dir: directory where the CSV output is saved.
+#     """
+#     if branch_path is None:
+#         branch_path = []
+    
+#     # Stop if we've consumed all hierarchical levels
+#     if current_level >= len(levels):
+#         return
+    
+#     level_col = levels[current_level]
+#     unique_vals = dat[level_col].unique()
+    
+#     # If there's no real split at this level, just exit
+#     if len(unique_vals) < 2:
+#         return
+    
+#     # Ensure output directory exists
+#     os.makedirs(output_dir, exist_ok=True)
+    
+#     # For each unique group at the current level
+#     for val in unique_vals:
+#         # labs is a boolean mask for the current subset of `dat`
+#         labs = (dat[level_col] == val)
+        
+#         # 1) Perform differential analysis: val vs. not val
+#         diff = differential_lipids(lipid_data, labs, min_fc=min_fc, pthr=pthr)
+        
+#         # (Optional) sort by log2 fold change, descending
+#         diff = diff.sort_values(by="log2fold_change", ascending=False)
+        
+#         # 2) Construct a filename reflecting the path taken so far
+#         path_labels = [
+#             f"{lvl_name}={lvl_val}"
+#             for lvl_name, lvl_val in zip(levels[:current_level], branch_path)
+#         ]
+#         path_labels.append(f"{level_col}={val}")
+#         filename = "_".join(path_labels) + ".csv"
+        
+#         # Save differential results
+#         out_path = os.path.join(output_dir, filename)
+#         diff.to_csv(out_path, index=False)
+        
+#         # 3) Recurse deeper:
+#         #    - subset `dat` to only the rows where labs==True
+#         #    - subset `lipid_data` the same way so indexes remain aligned
+#         sub_dat = dat.loc[labs]
+#         sub_lipid_data = lipid_data.loc[labs]
+
+#         traverse_and_diff(
+#             dat=sub_dat,
+#             lipid_data=sub_lipid_data,
+#             levels=levels,
+#             current_level=current_level + 1,
+#             branch_path=branch_path + [val],
+#             min_fc=min_fc,
+#             pthr=pthr,
+#             output_dir=output_dir
+#         )
