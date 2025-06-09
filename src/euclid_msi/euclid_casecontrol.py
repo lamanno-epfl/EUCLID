@@ -1,4 +1,3 @@
-# Cell 1: Import necessary libraries
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,11 +41,10 @@ from typing import List, Optional, Tuple
 CASECONTROL_DIR = Path(os.getcwd()) / "casecontrol_analysis"
 CASECONTROL_DIR.mkdir(exist_ok=True)
 
-# Cell 2: Dashboard for configurable hyperparameters
 class LipidAnalysisConfig:
     def __init__(self):
         # Lipids to analyze
-        self.lipids_to_analyze = ["PI 38:7"]  # Default lipid
+        self.lipids_to_analyze = ["SM 34:1;O2"]  # Default lipid
         
         # Model hyperparameters
         self.learning_rate = 0.05
@@ -55,7 +53,7 @@ class LipidAnalysisConfig:
         
         # Priors for the model
         self.supertype_prior_std = 1.0
-        self.supertype_susceptibility_prior_std = 1.0
+        self.supertype_shift_prior_std = 1.0
         self.sample_prior_std = 1.0
         self.section_prior_std = 5.0
         
@@ -66,7 +64,7 @@ class LipidAnalysisConfig:
         
         # Guide parameters
         self.guide_supertype_unconst_scale = 0.1
-        self.guide_supertype_susceptibility_scale = 0.1
+        self.guide_supertype_shift_scale = 0.1
         
     def display_config(self):
         """Display the current configuration."""
@@ -80,12 +78,12 @@ class LipidAnalysisConfig:
         print(f"Normalization percentiles: {self.normalize_percentiles}")
         print("Prior standard deviations:")
         print(f"  - Supertype: {self.supertype_prior_std}")
-        print(f"  - Supertype susceptibility: {self.supertype_susceptibility_prior_std}")
+        print(f"  - Supertype shift: {self.supertype_shift_prior_std}")
         print(f"  - Sample: {self.sample_prior_std}")
         print(f"  - Section: {self.section_prior_std}")
         print("Guide parameters:")
         print(f"  - Supertype unconst scale: {self.guide_supertype_unconst_scale}")
-        print(f"  - Supertype susceptibility scale: {self.guide_supertype_susceptibility_scale}")
+        print(f"  - Supertype shift scale: {self.guide_supertype_shift_scale}")
 
 def cfg_string(cfg):
     return (
@@ -95,27 +93,12 @@ def cfg_string(cfg):
         f"_seed{cfg.random_seed}"
         f"_priorS{cfg.sample_prior_std}"
         f"_priorSec{cfg.section_prior_std}"
-        f"_suscPrior{cfg.supertype_susceptibility_prior_std}"
+        f"_suscPrior{cfg.supertype_shift_prior_std}"
         f"_guideU{cfg.guide_supertype_unconst_scale}"
-        f"_guideS{cfg.guide_supertype_susceptibility_scale}"
+        f"_guideS{cfg.guide_supertype_shift_scale}"
     )
 
 config = LipidAnalysisConfig()
-        
-# Cell 3: Load and preprocess data
-def load_data():
-    """Load the lipid data and perform initial preprocessing."""
-    sub_alldata = pd.read_parquet("interpretable_lipids2.parquet")
-    # Remove specific samples
-    sub_alldata = sub_alldata.loc[~sub_alldata["Sample"].isin(["Male1", "Male2", "Male3"]),:]
-    
-    # Convert categorical columns
-    sub_alldata['Condition'] = sub_alldata['Condition'].astype('category')
-    sub_alldata['supertype'] = sub_alldata['supertype'].astype('category')
-    sub_alldata['Sample'] = sub_alldata['Sample'].astype('category')
-    sub_alldata['SectionID'] = sub_alldata['SectionID'].astype('category')
-    
-    return sub_alldata
 
 def normalize_lipid_column(df, column, lower_percentile=0.1, upper_percentile=99.9):
     """Normalize a lipid column to the range [0, 1] after clipping outliers."""
@@ -127,8 +110,6 @@ def normalize_lipid_column(df, column, lower_percentile=0.1, upper_percentile=99
     df[column] = normalized
     return df
 
-
-# Cell 4: Functions for spatial subsampling
 @njit
 def sample_section(xs, ys, rand_idxs, max_x, max_y):
     """
@@ -231,7 +212,6 @@ def analyze_nearest_neighbors(subsample):
     
     return nn_by_section, all_nn
 
-# Cell 5: Create train and test sets with subsampling
 def create_train_test_sets(coords, seed=42, downsampling=1):
     """Create training and test sets with spatial subsampling."""
     # Generate subsamples with no neighbors
@@ -245,7 +225,6 @@ def create_train_test_sets(coords, seed=42, downsampling=1):
     
     return subsample, testset
 
-# Cell 6: Visualize spatial subsampling
 def visualize_subsampling(coords, subsample):
     """Visualize a section to verify spatial subsampling."""
     section_id = coords['SectionID'].unique()[0]
@@ -264,18 +243,42 @@ def visualize_subsampling(coords, subsample):
     plt.gca().invert_yaxis()  # optional, if your pixel origin is top-left
     plt.tight_layout()
     
-
-
-# Cell 7: Define the hierarchical model for pregnancy
-def model_pregnancy_hierarchical(
+def model_CASE_CONTROL_hierarchical(
     condition_code, section_code, supertype_code,
     map_section_to_sample, map_sample_to_condition,
     lipid_x=None
 ):
-    """
-    Hierarchical model for pregnancy lipid analysis with:
-      a) non-centered sections
-      b) per-sample heteroskedasticity
+    """Hierarchical Bayesian model for analyzing lipid expression patterns in CASE_CONTROL.
+
+    This model implements a hierarchical Bayesian structure to analyze lipid expression
+    patterns across different biological levels (supertypes, samples, and sections) while
+    accounting for CASE_CONTROL condition effects. The model uses a non-centered parameterization
+    for better sampling efficiency.
+
+    Parameters
+    ----------
+    condition_code : array-like
+        Binary codes indicating CASE_CONTROL condition (0 for control, 1 for CASE_CONTROL)
+    section_code : array-like
+        Integer codes identifying tissue sections
+    supertype_code : array-like
+        Integer codes identifying cell supertypes
+    map_section_to_sample : array-like
+        Mapping from section codes to sample codes
+    map_sample_to_condition : array-like
+        Mapping from sample codes to condition codes
+    lipid_x : array-like, optional
+        Observed lipid expression values. If None, the model runs in prior predictive mode.
+
+    Notes
+    -----
+    The model implements a three-level hierarchy:
+    1. Supertype level: Models baseline expression and condition shift
+    2. Sample level: Captures inter-individual variation
+    3. Section level: Models section-specific variations within samples (batch effects)
+
+    The model uses sum-to-zero constraints on section effects within each condition
+    to ensure identifiability and model batch effects.
     """
     # number of levels
     n_sections   = len(np.unique(section_code))
@@ -287,9 +290,9 @@ def model_pregnancy_hierarchical(
     # Supertypes main effects
     # ----------------------------
     with numpyro.plate("plate_supertype", n_supertypes):
-        alpha_supertype_susceptibility = numpyro.sample(
-            "alpha_supertype_susceptibility",
-            dist.Normal(0.0, config.supertype_susceptibility_prior_std)
+        alpha_supertype_shift = numpyro.sample(
+            "alpha_supertype_shift",
+            dist.Normal(0.0, config.supertype_shift_prior_std)
         )
         alpha_supertype_unconst = numpyro.sample(
             "alpha_supertype_unconst",
@@ -339,22 +342,49 @@ def model_pregnancy_hierarchical(
         + alpha_supertype[supertype_code]
         + jnp.where(
             condition_code == 1,
-            alpha_supertype_susceptibility[supertype_code],
+            alpha_supertype_shift[supertype_code],
             0.0
         )
     )
     with numpyro.plate("data", len(section_code)):
         numpyro.sample("obs", dist.Normal(mu, 0.1), obs=lipid_x)
 
-
-# Cell 8: Define the guide (variational approximation)
 def manual_guide(
     condition_code, section_code, supertype_code,
     map_section_to_sample, map_sample_to_condition, 
     lipid_x=None
 ):
-    """
-    Manual guide for variational inference.
+    """Manual guide for variational inference of the CASE_CONTROL hierarchical model.
+
+    This guide implements a structured variational approximation for the hierarchical
+    CASE_CONTROL model. It uses a mean-field approximation with specific parameterizations
+    for each level of the hierarchy.
+
+    Parameters
+    ----------
+    condition_code : array-like
+        Binary codes indicating CASE_CONTROL condition (0 for control, 1 for CASE_CONTROL)
+    section_code : array-like
+        Integer codes identifying tissue sections
+    supertype_code : array-like
+        Integer codes identifying cell supertypes
+    map_section_to_sample : array-like
+        Mapping from section codes to sample codes
+    map_sample_to_condition : array-like
+        Mapping from sample codes to condition codes
+    lipid_x : array-like, optional
+        Observed lipid expression values. If None, the guide runs in prior predictive mode.
+
+    Notes
+    -----
+    The guide implements variational distributions for:
+    1. Supertype effects: Normal distributions with learnable location and scale
+    2. Sample effects: Delta distributions for mean and log-scale parameters
+    3. Section effects: Delta distributions for non-centered parameters
+
+    The guide uses configurable scale parameters (guide_supertype_unconst_scale and
+    guide_supertype_shift_scale) to control the initial uncertainty in the
+    variational approximation.
     """
     n_sections   = len(np.unique(section_code))
     n_samples    = len(np.unique(map_section_to_sample))
@@ -370,9 +400,9 @@ def manual_guide(
         constraint=dist.constraints.positive
     )
     alpha_supertype_susc_loc = numpyro.param(
-        "alpha_supertype_susceptibility_loc", jnp.zeros((n_supertypes,)))
+        "alpha_supertype_shift_loc", jnp.zeros((n_supertypes,)))
     alpha_supertype_susc_scale = numpyro.param(
-        "alpha_supertype_susceptibility_scale", jnp.full((n_supertypes,), config.guide_supertype_susceptibility_scale),
+        "alpha_supertype_shift_scale", jnp.full((n_supertypes,), config.guide_supertype_shift_scale),
         constraint=dist.constraints.positive
     )
     
@@ -382,7 +412,7 @@ def manual_guide(
             dist.Normal(alpha_supertype_unconst_loc, alpha_supertype_unconst_scale)
         )
         numpyro.sample(
-            "alpha_supertype_susceptibility",
+            "alpha_supertype_shift",
             dist.Normal(alpha_supertype_susc_loc, alpha_supertype_susc_scale)
         )
     
@@ -415,18 +445,9 @@ def manual_guide(
             dist.Delta(z_section_loc)
         )
 
-
-# Cell 9: Data preparation function
 def prepare_data(df, lipid_name):
     """
     Prepare data for model training.
-    
-    Parameters:
-    - df: DataFrame with lipid data
-    - lipid_name: Name of the lipid column to use
-    
-    Returns:
-    - Prepared data for model training
     """
     train = df.copy()
     
@@ -468,8 +489,6 @@ def prepare_data(df, lipid_name):
         train["Condition_code"].values
     )
 
-
-# Cell 10: Function to run training
 def train_lipid_model(train_df, lipid_name, num_epochs=2000, learning_rate=0.05):
     """
     Train the model for a specific lipid.
@@ -495,7 +514,7 @@ def train_lipid_model(train_df, lipid_name, num_epochs=2000, learning_rate=0.05)
     optimizer = optax.adam(learning_rate=learning_rate)
     
     svi = SVI(
-        model_pregnancy_hierarchical, 
+        model_CASE_CONTROL_hierarchical, 
         manual_guide, 
         optimizer, 
         loss=Trace_ELBO()
@@ -551,12 +570,12 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
 
     # ── Draw variational samples (rename 'samples' → 'samples_params') ────────
     samples_params = Predictive(
-        model_pregnancy_hierarchical,
+        model_CASE_CONTROL_hierarchical,
         guide=manual_guide,
         params=final_params,
         num_samples=1000,
         return_sites=[
-            "alpha_supertype_susceptibility",
+            "alpha_supertype_shift",
             "alpha_supertype_unconst",
             "mu_alpha_sample_unconst",
             "log_sigma_sample",
@@ -592,7 +611,7 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
 
     sectionmeans   = sections_centered.mean(axis=0)
     supertypemeans = jnn.sigmoid(samples_params["alpha_supertype_unconst"]).mean(axis=0)
-    suscmeans      = samples_params["alpha_supertype_susceptibility"].mean(axis=0)
+    suscmeans      = samples_params["alpha_supertype_shift"].mean(axis=0)
 
     # ── Reconstruction vs ground truth (unchanged) ─────────────────────────
     gts, recons, colors = [], [], []
@@ -618,9 +637,9 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
     plt.savefig(PDF_DIR /f"{lipid_name}_reconstruction.pdf")
     
     """ outdated...
-    # ── Statistical analysis on susceptibility ─────────────────────────────
-    loc   = np.array(samples_params["alpha_supertype_susceptibility"].mean(axis=0))
-    scale = np.array(jnp.std(samples_params["alpha_supertype_susceptibility"], axis=0))
+    # ── Statistical analysis on shift ─────────────────────────────
+    loc   = np.array(samples_params["alpha_supertype_shift"].mean(axis=0))
+    scale = np.array(jnp.std(samples_params["alpha_supertype_shift"], axis=0))
     z_stat = loc / scale
     p_values = 2 * norm.sf(np.abs(z_stat))
     p_plus   = norm.cdf(z_stat)
@@ -645,7 +664,7 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
         "ci_97.5%":       loc + 1.96*scale,
         "p-value":        p_values
     }, index=names).sort_values("lfsr")
-    df_stats.to_csv(f"{lipid_name}_pregnancy_shifts.csv")
+    df_stats.to_csv(f"{lipid_name}_CASE_CONTROL_shifts.csv")
 
     # ── Sample-effects vs observed means ───────────────────────────────────
     obs_means = train.groupby("Sample_code")[lipid_name].mean()
@@ -659,7 +678,7 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
     # ── Posterior Error Probabilities & q-values for 5% FDR vs 0 ──────────
     # REFERENCE: http://varianceexplained.org/r/bayesian_fdr_baseball/
     # assume `samples` is shape [n_samples, n_supertypes]
-    samples = np.array(samples_params["alpha_supertype_susceptibility"])
+    samples = np.array(samples_params["alpha_supertype_shift"])
 
     # 1) probability each effect is positive vs negative
     p_pos = (samples > 0).mean(axis=0)
@@ -695,11 +714,10 @@ def analyze_posterior(svi, svi_state, train, lipid_name, mappingtable):
     }, index=mappingtable["supertype"].values) \
         .sort_values("qvalue")
 
-    df_stats.to_csv(f"{lipid_name}_pregnancy_shifts_fdr5_vs0.csv")
+    df_stats.to_csv(f"{lipid_name}_CASE_CONTROL_shifts_fdr5_vs0.csv")
 
     return samples_params, df_stats
 
-# Cell 12: Predictive performance evaluation
 def evaluate_model(svi, svi_state, train_df, test_df, lipid_name):
     """
     Evaluate model performance on test data.
@@ -723,7 +741,7 @@ def evaluate_model(svi, svi_state, train_df, test_df, lipid_name):
     # Create predictive object
     num_samples = 1000
     predictive = Predictive(
-        model_pregnancy_hierarchical,
+        model_CASE_CONTROL_hierarchical,
         guide=manual_guide,
         params=final_params,
         num_samples=num_samples
@@ -831,7 +849,7 @@ def visualize_distribution_grid(samples_params, train, lipid_name, num_sections=
             # Use reconstructed section mean
             alpha_sec = float(alpha_section_means[secnow])
             alpha_st = float(jnn.sigmoid(samples_params["alpha_supertype_unconst"]).mean(axis=0)[supertypenow])
-            alpha_st_susc = float(samples_params["alpha_supertype_susceptibility"].mean(axis=0)[supertypenow])
+            alpha_st_susc = float(samples_params["alpha_supertype_shift"].mean(axis=0)[supertypenow])
             sigma = 0.1
             
             mu = alpha_sec + alpha_st + (alpha_st_susc if this_condition == 1 else 0.0)
@@ -860,8 +878,6 @@ def visualize_distribution_grid(samples_params, train, lipid_name, num_sections=
     plt.tight_layout()
     plt.savefig(PDF_DIR /f"{lipid_name}_distribution_grid.pdf", dpi=300)
     
-
-# Cell 14: Plot parameter traces and ELBO
 def plot_parameter_traces(param_traces, losses, lipid_name):
     """
     Plot parameter traces and ELBO loss.
@@ -957,9 +973,6 @@ def plot_parameter_traces(param_traces, losses, lipid_name):
         plt.tight_layout(pad=3.0)
         plt.savefig(PDF_DIR /f"{lipid_name}_param_traces_final.pdf")
         
-
-
-# Cell 15: Main function to run analysis for multiple lipids
 def analyze_lipids(lipids, config, sub_alldata, subsample, testset):
     """
     Run the complete analysis for multiple lipids.
@@ -1035,8 +1048,6 @@ def analyze_lipids(lipids, config, sub_alldata, subsample, testset):
     
     return results
 
-
-# Cell 16: Prior predictive check
 def prior_predictive_check(train_df, lipid_name):
     """
     Perform a prior predictive check for a given lipid.
@@ -1049,7 +1060,7 @@ def prior_predictive_check(train_df, lipid_name):
     train, lipid_x, map_sample_to_condition, map_section_to_sample, supertype_code, section_code, condition_code = prepare_data(train_df, lipid_name)
     
     # Create predictive object
-    predictive = Predictive(model_pregnancy_hierarchical, num_samples=25)
+    predictive = Predictive(model_CASE_CONTROL_hierarchical, num_samples=25)
     
     # Generate samples from the prior
     prior_samples = predictive(
@@ -1077,9 +1088,6 @@ def prior_predictive_check(train_df, lipid_name):
     plt.title(f'Prior Predictive Check for {lipid_name}')
     plt.savefig(PDF_DIR /f"{lipid_name}_prior_predictive.pdf")
     
-
-
-# Cell 17: Run the analysis
 def main(sub_alldata, coords, config):
     """Main function to run the full analysis workflow."""
     # Set up the configuration
@@ -1168,7 +1176,6 @@ def main(sub_alldata, coords, config):
     
     return results
 
-# --- New API function ---
 class CaseControlAnalysis:
     """
     A class for case-control analysis on spatial lipidomics data.
@@ -1199,14 +1206,14 @@ class CaseControlAnalysis:
         num_epochs=2000,
         adaptive_lr=False,
         supertype_prior_std=1.0,
-        supertype_susceptibility_prior_std=1.0,
+        supertype_shift_prior_std=1.0,
         sample_prior_std=1.0,
         section_prior_std=5.0,
         downsampling=1,
         random_seed=42,
         normalize_percentiles=(0.1, 99.9),
         guide_supertype_unconst_scale=0.1,
-        guide_supertype_susceptibility_scale=0.1,
+        guide_supertype_shift_scale=0.1,
         x_col="x",
         y_col="y",
         sectionid_col="SectionID",
@@ -1215,8 +1222,75 @@ class CaseControlAnalysis:
         supertype_col="supertype",
         verbose=True
     ):
-        """
-        Run case-control analysis on an AnnData object and save all outputs to the unified folder.
+        """Run case-control analysis on spatial lipidomics data.
+
+        This method performs a comprehensive case-control analysis on spatial lipidomics data stored in an AnnData object.
+        It analyzes lipid expression patterns across different conditions, taking into account spatial information and
+        lipizone supertypes.
+
+        Parameters
+        ----------
+        lipids_to_analyze : list
+            List of lipid names to analyze from the AnnData object.
+        learning_rate : float, default=0.05
+            Learning rate for the optimization process.
+        num_epochs : int, default=2000
+            Number of training epochs for the model.
+        adaptive_lr : bool, default=False
+            Whether to use adaptive learning rate during training.
+        supertype_prior_std : float, default=1.0
+            Standard deviation for the supertype-level prior distribution.
+        supertype_shift_prior_std : float, default=1.0
+            Standard deviation for the supertype shift prior distribution.
+        sample_prior_std : float, default=1.0
+            Standard deviation for the sample-level prior distribution.
+        section_prior_std : float, default=5.0
+            Standard deviation for the section-level prior distribution.
+        downsampling : int, default=1
+            Factor by which to downsample the data (1 means no downsampling).
+        random_seed : int, default=42
+            Random seed for reproducibility.
+        normalize_percentiles : tuple, default=(0.1, 99.9)
+            Percentiles for data normalization (lower, upper).
+        guide_supertype_unconst_scale : float, default=0.1
+            Scale parameter for unconstrained supertype guide.
+        guide_supertype_shift_scale : float, default=0.1
+            Scale parameter for supertype shift guide.
+        x_col : str, default="x"
+            Column name for x-coordinates in the AnnData object.
+        y_col : str, default="y"
+            Column name for y-coordinates in the AnnData object.
+        sectionid_col : str, default="SectionID"
+            Column name for section identifiers in the AnnData object.
+        sample_col : str, default="Sample"
+            Column name for sample identifiers in the AnnData object.
+        condition_col : str, default="Condition"
+            Column name for condition labels in the AnnData object.
+        supertype_col : str, default="supertype"
+            Column name for supertype labels in the AnnData object.
+        verbose : bool, default=True
+            Whether to print progress information.
+
+        Returns
+        -------
+        dict
+            Dictionary containing the analysis results, including:
+            - Model parameters
+            - Posterior distributions
+            - Statistical summaries
+            - Visualization data
+
+        Raises
+        ------
+        ValueError
+            If required columns are missing from the AnnData object.
+            If no level columns are found to create supertype information.
+
+        Notes
+        -----
+        - The method automatically creates a supertype column if it doesn't exist, using level columns
+          from the AnnData object.
+        - All outputs are saved to the casecontrol directory specified in the class initialization.
         """
         import pandas as pd
         obs = self.adata.obs.copy()
@@ -1244,14 +1318,14 @@ class CaseControlAnalysis:
         config.num_epochs = num_epochs
         config.adaptive_lr = adaptive_lr
         config.supertype_prior_std = supertype_prior_std
-        config.supertype_susceptibility_prior_std = supertype_susceptibility_prior_std
+        config.supertype_shift_prior_std = supertype_shift_prior_std
         config.sample_prior_std = sample_prior_std
         config.section_prior_std = section_prior_std
         config.downsampling = downsampling
         config.random_seed = random_seed
         config.normalize_percentiles = normalize_percentiles
         config.guide_supertype_unconst_scale = guide_supertype_unconst_scale
-        config.guide_supertype_susceptibility_scale = guide_supertype_susceptibility_scale
+        config.guide_supertype_shift_scale = guide_supertype_shift_scale
         global CASECONTROL_DIR
         global PDF_DIR
         CASECONTROL_DIR = self.casecontrol_dir
@@ -1301,7 +1375,7 @@ class CaseControlAnalysis:
                 index=supertypes, columns=[lipid]
             )
             shift = pd.DataFrame(
-                params['alpha_supertype_susceptibility_loc'],
+                params['alpha_supertype_shift_loc'],
                 index=supertypes, columns=[lipid]
             )
             aaaa_list.append(shift)
@@ -1329,7 +1403,7 @@ class CaseControlAnalysis:
         lipids_to_analyze,
         supertypes=None,
         model_dir=None,
-        output_prefix="pregnancy",
+        output_prefix="CASE_CONTROL",
         baseline_condition="naive",
         upreg_threshold=0.2,
         prob_threshold=0.98,
@@ -1366,8 +1440,8 @@ class CaseControlAnalysis:
                 print(f"Warning: {param_path} not found, skipping.")
                 continue
             params = np.load(param_path, allow_pickle=True).item()
-            loc_susc = params['alpha_supertype_susceptibility_loc']
-            scale_susc = params['alpha_supertype_susceptibility_scale']
+            loc_susc = params['alpha_supertype_shift_loc']
+            scale_susc = params['alpha_supertype_shift_scale']
             loc_unconst = params['alpha_supertype_unconst_loc']
             scale_unconst = params['alpha_supertype_unconst_scale']
 
@@ -1500,7 +1574,7 @@ class CaseControlAnalysis:
         thresh = threshold if threshold is not None else thresh
         
         if output_filename is None:
-            output_filename = f"{self.analysis_name}_overview_pregnancy_shifts.pdf"
+            output_filename = f"{self.analysis_name}_overview_CASE_CONTROL_shifts.pdf"
         
         # Calculate log2 fold changes
         shifts = np.log2((shift + baseline) / baseline).fillna(0)
@@ -1702,7 +1776,7 @@ class CaseControlAnalysis:
             'Color': Linkage_colors
         })
         
-        color_df.to_csv(f"{self.analysis_name}_color_df_pregnancy.csv")
+        color_df.to_csv(f"{self.analysis_name}_color_df_CASE_CONTROL.csv")
         metadata['cluster_variation'] = metadata[supertype_col].map(clusters_series).fillna("lightgray")
         color_df.index = color_df['Linkage Cluster']
         metadata['cluster_variation_color'] = metadata['cluster_variation'].map(color_df['Color'])

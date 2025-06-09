@@ -1,21 +1,3 @@
-"""
-plotting.py – Production-ready plotting module for EUCLID
-
-All plots are saved in a folder named "plots" (created if it does not exist) in PDF format.
-Scatter plots are rasterized and other elements remain vectorial.
-All adjustable parameters are exposed in the function signatures.
-This module integrates your original draft details – for example, median-based vmin/vmax calculations,
-dynamic grid layouts for multi-section plots, filtering by metadata, and hierarchical lipizone plotting
-(using a user-provided hierarchical level to determine modal "lipizone_color").
-  
-Expected AnnData structure example:
-    obs: 'SectionID', 'x', 'y', 'Path', 'Sample', 'Sex', 'Condition', 'SectionID', 'BadSection',
-         'X_Leiden', 'X_Euclid', 'lipizone_colors', 'allen_division', 'boundary', 'acronym', etc.
-    uns: 'feature_selection_scores', 'neighbors'
-    obsm: 'X_NMF', 'X_Harmonized', 'X_approximated', 'X_TSNE', 'X_restored'
-    obsp: 'distances', 'connectivities'
-"""
-
 import os
 import re
 import math
@@ -492,7 +474,7 @@ class Plotting:
         else:
             plt.close()
 
-    def plot_lipizones(self, levels: pd.DataFrame,
+    def plot_lipizones(self,
                        lipizone_col: str = "lipizone_names",
                        section_col: str = "SectionID",
                        level_filter: str = None,
@@ -508,9 +490,6 @@ class Plotting:
         
         Parameters
         ----------
-        levels : pd.DataFrame
-            DataFrame including spatial coordinates ('zccf','yccf'), section (section_col),
-            and lipizone labels.
         lipizone_col : str, optional
             Column with lipizone labels.
         section_col : str, optional
@@ -520,7 +499,7 @@ class Plotting:
         show_inline : bool, optional
             Whether to display the plot inline.
         """
-        df = levels.copy()
+        df = self.adata.obs.copy()
         # If a level_filter is provided, compute the modal lipizone_color for each unique combination
         if level_filter is not None and level_filter in df.columns:
             grouping_cols = [col for col in df.columns if col.startswith("level_") and int(col.split("_")[1]) <= int(level_filter.split("_")[1])]
@@ -932,7 +911,7 @@ class Plotting:
         else:
             plt.close()
 
-    def plot_sample_correlation_pca(self, centroids: pd.DataFrame, show_inline: bool = False) -> None:
+    def plot_sample_correlation_pca(self, centroids: pd.DataFrame, show_inline: bool = False) -> None: ### UNTESTED YET
         """
         Plot 3D PCA of sample centroids and a clustermap of their correlation.
         
@@ -974,7 +953,7 @@ class Plotting:
         cg.savefig(os.path.join(self.plots_dir, "sample_correlation_heatmap.pdf"))
         plt.close()
 
-    def plot_differential_barplot(self, diff_df: pd.DataFrame, indices_to_label: list,
+    def plot_differential_barplot(self, diff_df: pd.DataFrame, indices_to_label: list, ### UNTESTED YET
                                   ylabel: str = "log2 fold change", show_inline: bool = False) -> None:
         """
         Plot a sorted barplot for differential lipids colored by their class.
@@ -1011,23 +990,6 @@ class Plotting:
             plt.show()
         else:
             plt.close()
-
-    # Placeholders for Plotly-based rendering, clock visualization, and movie generation.
-    def plot_3d_rendering_plotly(self):
-        """Placeholder for 3D rendering using Plotly."""
-        print("plot_3d_rendering_plotly not implemented yet.")
-
-    def plot_2d_rendering_plotly(self):
-        """Placeholder for 2D rendering using Plotly with zoomability."""
-        print("plot_2d_rendering_plotly not implemented yet.")
-
-    def plot_treemap(self):
-        """Placeholder for lipizones interactive treemap."""
-        print("plot_treemap not implemented yet.")
-
-    def make_movie(self):
-        """Placeholder for making a movie from the data."""
-        print("make_movie not implemented yet.")
 
     def plot_global_lipidomic_similarity(self, show_inline: bool = True, coloring="subclass") -> None:
         """
@@ -2370,7 +2332,7 @@ class Plotting:
 
     def plot_mosaic(self, section_id, output_file="mosaic.pdf", figsize=(10, 16), point_size=2.0, alpha=1.0):
         """
-        Create a mosaic-style visualization of a single section, using lipizone colors.
+        Create a mosaic-style visualization of a half of a single section, using lipizone colors.
         The plot uses transformed coordinates (-y, -x) and has a black background.
 
         Parameters

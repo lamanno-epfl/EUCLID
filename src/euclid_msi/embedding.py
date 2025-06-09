@@ -27,16 +27,6 @@ os.environ['OMP_NUM_THREADS'] = '6'
 class Embedding():
     
     def __init__(self, prep, analysis_name="analysis"):
-        """
-        Initialize the Embedding class with preprocessed data.
-
-        Parameters:
-        -----------
-        prep : object
-            A preprocessing object containing AnnData (adata) with single-cell data.
-        analysis_name : str, optional
-            Prefix for all output files. Default is "analysis".
-        """
         self.analysis_name = analysis_name
         if prep is not None:
             self.adata = prep.adata
@@ -53,7 +43,6 @@ class Embedding():
         random_state: int = 42,
     ):
         """
-        BLOCK 1:
         Compute seeded NMF embeddings on a reference set.
         
         Parameters
@@ -69,21 +58,14 @@ class Embedding():
 
         Returns
         -------
-        nmf_embeddings : pd.DataFrame
-            The W matrix of NMF (pixels x N_factors).
-        factor_to_lipid : np.ndarray
-            The H matrix from NMF (components x lipids).
-        N_factors : int
-            The number of factors (i.e. communities) chosen.
-        nmf_model : NMF
-            The fitted NMF model.
+        Updates itw own state with the NMF embeddings and the factor_to_lipid matrix
         """
         # 1. Compute correlation matrix between lipids (features)
         corr = np.corrcoef(self.data_df.values.T)
         corr_matrix = np.abs(corr)
         np.fill_diagonal(corr_matrix, 0)
 
-        # Create a dummy AnnData to store connectivity
+        # Create a dummy AnnData to store connectivity for Leiden clustering
         temp_adata = anndata.AnnData(X=np.zeros_like(corr_matrix))
         temp_adata.obsp['connectivities'] = csr_matrix(corr_matrix)
         temp_adata.uns['neighbors'] = {
@@ -92,9 +74,7 @@ class Embedding():
             'params': {'n_neighbors': 10, 'method': 'custom'}
         }
 
-        # Build a network from correlation matrix
         G = nx.from_numpy_array(corr_matrix)
-
         gamma_values = np.linspace(resolution_range[0], resolution_range[1], num=num_gamma)
         num_communities = []
         modularity_scores = []
@@ -117,10 +97,10 @@ class Embedding():
             objective_values.append(f_gamma)
 
         # Plot for visual inspection (could also be saved)
-        plt.figure()
-        plt.plot(np.arange(len(objective_values)), objective_values)
-        plt.title("Objective function vs Gamma index")
-        plt.show()
+        #plt.figure()
+        #plt.plot(np.arange(len(objective_values)), objective_values)
+        #plt.title("Objective function vs Gamma index")
+        #plt.show()
 
         max_index = np.argmax(objective_values)
         best_gamma = gamma_values[max_index]
@@ -168,9 +148,6 @@ class Embedding():
         new_adata = None
     ):
         """
-        BLOCK 2:
-        Apply the learnt NMF model to new data to derive embeddings.
-        
         Parameters
         ----------
         new_adata : sc.AnnData, optional
@@ -210,17 +187,16 @@ class Embedding():
         covariates: list = None,
     ):
         """
-        BLOCK 3:
         Correct residual batch effects on the NMF embeddings using Harmony.
         
         Parameters
         ----------
-        adata : sc.AnnData, optional
-            AnnData object containing an X_NMF slot, to which an X_Harmonized slot will be added
+        covariates : list, optional
+            List of covariates to use for harmonization.
         
         Returns
         -------
-            adata with an X_Harmonized slot
+            sets in the adata an X_Harmonized slot
         """
         nmf_embeddings = pd.DataFrame(self.adata.obsm['X_NMF'], index=self.adata.obs_names)
         batches = self.adata.obs[covariates].astype("category")
@@ -238,19 +214,11 @@ class Embedding():
         self
     ):
         """
-        BLOCK 4:
         Reconstruct an approximation of the original dataset from the harmonized NMF.
-        
-        Parameters
-        ----------
-        adata : sc.AnnData, optional
-            AnnData object to which the approximated dataset for clustering (harmony-NMF bottleneck) will be added (in obsm['X_approximated']).
-        factor_to_lipid : np.ndarray
-            The H matrix from NMF (factors x lipids).
         
         Returns
         -------
-            an X_approximated slot
+            sets in the adata an X_approximated slot
         """
         recon = np.dot(self.adata.obsm['X_Harmonized'], self.factor_to_lipid)
         self.adata.obsm['X_approximated'] = recon - np.min(recon) + 1e-7
@@ -265,13 +233,10 @@ class Embedding():
         init_indices: tuple = (0, 1)
     ):
         """
-        BLOCK 5:
         Compute a tSNE visualization of the (corrected) NMF embeddings.
         
         Parameters
         ----------
-       adata : sc.AnnData, optional
-            AnnData object containing an X_Harmonized or X_NMF slot
         perplexity : int, optional
             tSNE perplexity.
         n_iter1 : int, optional

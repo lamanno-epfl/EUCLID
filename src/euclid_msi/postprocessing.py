@@ -1,20 +1,3 @@
-"""
-Postprocessing module for EUCLID.
-This module implements various postprocessing steps on the AnnData object produced by embedding.
-The functionalities include:
-  - XGBoost‐based imputation (feature restoration)
-  - 3D anatomical interpolation
-  - (Placeholder) Training a variational autoencoder ("lipimap")
-  - Registering an additional modality
-  - Comparing parcellations between modalities
-  - Running a multiomics factor analysis (MOFA) and subsequent tSNE
-  - Neighborhood analysis of clusters
-  - UMAP visualization of molecules and lipizones
-  - Extraction of spatial modules based on anatomical colocalization
-
-Each BLOCK of code has been integrated into a corresponding method.
-"""
-
 import os
 import joblib
 import pickle
@@ -113,26 +96,20 @@ class Postprocessing:
     def __init__(self, emb, morans, analysis_name="analysis",
                  reference_image=None, annotation_image=None):
         """
+        Initialize the Postprocessing class for EUCLID.
+
         Parameters
         ----------
-        adata : sc.AnnData
-            The AnnData object from embedding.
-        embeddings : pd.DataFrame
-            The harmonized NMF embeddings (or similar) stored as a DataFrame.
+        emb : Embedding
+            A EUCLID Embedding object containing the processed data.
         morans : pd.DataFrame
-            DataFrame with Moran's I values (features x sections).
+            DataFrame containing Moran's I statistics for spatial autocorrelation.
         analysis_name : str, optional
             Prefix for all output files. Default is "analysis".
-        alldata : pd.DataFrame
-            The full raw data (e.g. from uMAIA) with columns corresponding to features.
-        pixels : pd.DataFrame
-            Pixel-level data extracted from adata (e.g. with spatial coordinates).
-        coordinates : pd.DataFrame
-            Spatial coordinates with columns such as ['Section', 'xccf', 'yccf', 'zccf'].
         reference_image : np.ndarray, optional
-            3D reference volume (for anatomical interpolation).
+            Reference image as a numpy array. If None, no reference image is used.
         annotation_image : np.ndarray, optional
-            3D anatomical annotation image.
+            Annotation image as a numpy array. If None, no annotation image is used.
         """
         self.analysis_name = analysis_name
         if emb is None:
@@ -165,10 +142,6 @@ class Postprocessing:
         ----------
         filename : str, optional
             File path to save the AnnData object. If None, uses analysis_name prefix.
-        save_embeddings : bool, optional
-            Whether to save the harmonized embeddings in the AnnData object.
-        save_restored_features : bool, optional
-            Whether to save any restored features from XGBoost imputation.
         """
         if filename is None:
             filename = f"{self.analysis_name}_msi_dataset_postprocessing_ops.h5ad"
@@ -322,11 +295,6 @@ class Postprocessing:
         print(f"Final var columns: {len(self.adata.var.columns)}")
         print(f"Final uns keys: {len(self.adata.uns.keys())}")
         print(f"Final obsm keys: {len(self.adata.obsm.keys())}")
-
-    # -------------------------------------------------------------------------
-    # BLOCK 1: XGBoost Feature Restoration
-    # -------------------------------------------------------------------------
-
     
     def xgboost_feature_restoration(
         self,
@@ -341,7 +309,8 @@ class Postprocessing:
         valid_pearson_threshold=0.4,
         output_model_dir=None,
         metrics_csv=None,
-        xgb_params=None
+        xgb_params=None,
+        min_sections_toattempt_restoration=3
     ):
         import os
         import numpy as np
@@ -397,11 +366,12 @@ class Postprocessing:
             CSV file path where per-feature training/validation metrics are recorded.
         xgb_params : dict or None
             Additional parameters passed to the XGBRegressor. If None, default params are used.
+        min_sections_toattempt_restoration : int, default=3
+            Minimum number of sections above moran_threshold required to attempt restoration of a feature.
     
         Returns
         -------
-        anndata.AnnData
-            Updated main AnnData object with the restored lipids added in .obsm.
+            Updates main AnnData object with the restored lipids added in .obsm.
         """
         if output_model_dir is None:
             output_model_dir = f"{self.analysis_name}_xgbmodels"
@@ -413,9 +383,9 @@ class Postprocessing:
     
         # 1) Determine which features (lipids) are restorable based on Moran's I threshold
         isitrestorable = (self.morans > moran_threshold).sum(axis=1).sort_values()
-        torestore = isitrestorable[isitrestorable > 3].index ######################################################################################################################
+        torestore = isitrestorable[isitrestorable > min_sections_toattempt_restoration].index 
     
-        # 2) Adjust alldata columns: ensure first 1400 columns are cast to string numbers (example-specific)
+        # 2) Adjust alldata columns: ensure first n columns are cast to string numbers (example-specific)
         cols = np.array(self.alldata.columns).astype(float).astype(str)
         self.alldata.columns = cols
     
@@ -547,10 +517,6 @@ class Postprocessing:
         self.adata.obsm['X_restored'] = coords_pred.iloc[:, 3:].values
         self.adata.uns['restored_feature_names'] = coords_pred.iloc[:, 3:].columns.tolist()
 
-
-    # -------------------------------------------------------------------------
-    # BLOCK 2: Anatomical Interpolation
-    # -------------------------------------------------------------------------
     def anatomical_interpolation(self, lipids, output_dir=None, w=50):
         """
         For each lipid (by name) in the given list, perform 3D anatomical interpolation.
@@ -635,9 +601,6 @@ class Postprocessing:
                 print(f"Error processing {lipid}: {e}")
                 continue
 
-    # -------------------------------------------------------------------------
-    # BLOCK 3: Train Lipimap (Placeholder)
-    # -------------------------------------------------------------------------
     def train_lipimap(self):
         """
         Placeholder for training a variational autoencoder to extract lipid programs.
@@ -645,9 +608,6 @@ class Postprocessing:
         print("train_lipimap wrapper is not implemented yet.")
         return None
 
-    # -------------------------------------------------------------------------
-    # BLOCK 4: Add Modality
-    # -------------------------------------------------------------------------
     def add_modality(self, modality_adata, modality_name):
         """
         Register another omic modality onto the main AnnData object.
@@ -670,9 +630,6 @@ class Postprocessing:
         self.adata.obsm[modality_name] = modality_data
         return self.adata
 
-    # -------------------------------------------------------------------------
-    # BLOCK 5: Compare Parcellations
-    # -------------------------------------------------------------------------
     def compare_parcellations(self, parcellation1, parcellation2, substrings=[], M=200, output_pdf=None):
         """
         Compare two parcellations (e.g. lipizones vs. cell types) via crosstab and heatmap.
@@ -729,10 +686,7 @@ class Postprocessing:
         plt.show()
         return normalized_df
 
-    # -------------------------------------------------------------------------
-    # BLOCK 6: Run MOFA
-    # -------------------------------------------------------------------------
-    def run_mofa(self, genes, lipids, factors=100, train_iter=10):
+    def run_mofa(self, genes, lipids, factors=100, train_iter=10): #### UNTESTED YET
         """
         Run a multiomics factor analysis (MOFA) to integrate two modalities.
         
@@ -800,10 +754,7 @@ class Postprocessing:
         np.save(f"{self.analysis_name}_minimofageneslipidsembedding_train_N.npy", tsne_coords.values)
         return {"factors": factors_df, "weights_gene": weights_gene, "weights_lipid": weights_lipid, "tsne": tsne_coords}
 
-    # -------------------------------------------------------------------------
-    # BLOCK 7: Neighborhood Analysis
-    # -------------------------------------------------------------------------
-    def neighborhood(self, metadata):
+    def neighborhood(self, metadata): #### UNTESTED YET
         """
         Calculate the frequency of clusters surrounding each pixel.
         
@@ -837,28 +788,23 @@ class Postprocessing:
         proportion_df = grouped.apply(lambda lst: {k: v/len(lst) for k, v in Counter(lst).items()})
         return proportion_df
 
-    # -------------------------------------------------------------------------
-    # BLOCK 8a: UMAP of Molecules
-    # -------------------------------------------------------------------------
     def umap_molecules(self, output_pdf=None, color_df=None):
         """
-        Perform UMAP on a subset of user-defined molecules (observations as features).
-        Plots labels using adjustText.
+        Perform UMAP dimensionality reduction on lipid molecules using lipizone-wise averages.
+        Creates a scatter plot with molecule labels and optional coloring.
         
         Parameters
         ----------
-        centroidsmolecules : pd.DataFrame
-            DataFrame with lipizone-wise averages (rows: lipizones; columns: molecules).
         output_pdf : str, optional
-            Filename for the saved PDF plot. If None, uses analysis_name prefix.
+            Path to save the output PDF plot. If None, uses analysis_name prefix.
         color_df : pd.DataFrame, optional
-            DataFrame with lipids as index and a "color" column to color scatter points.
+            DataFrame with lipids as index and a 'color' column to color scatter points.
             If None, all points will be colored gray.
-        
+            
         Returns
         -------
-        umap_coords : np.ndarray
-            UMAP coordinates.
+        np.ndarray
+            UMAP coordinates of the molecules.
         """
         if output_pdf is None:
             output_pdf = f"{self.analysis_name}_umap_molecules.pdf"
@@ -903,26 +849,22 @@ class Postprocessing:
         plt.show()
         return umap_result
 
-    # -------------------------------------------------------------------------
-    # BLOCK 8b: UMAP of Lipizones
-    # -------------------------------------------------------------------------
     def tsne_lipizones(self, perplexity=30, n_iter=1000):
         """
-        Perform t-SNE on lipizone centroids.
+        Perform t-SNE dimensionality reduction on lipizone centroids.
+        Creates a scatter plot colored by lipizone colors.
         
         Parameters
         ----------
-        centroids : pd.DataFrame
-            DataFrame of lipizone centroids.
-        perplexity : float, optional
-            t-SNE parameter.
-        n_iter : int, optional
-            Number of iterations for t-SNE.
-        
+        perplexity : float, default=30
+            The perplexity parameter for t-SNE, which balances local and global structure.
+        n_iter : int, default=1000
+            Maximum number of iterations for t-SNE optimization.
+            
         Returns
         -------
-        tsne_coords : np.ndarray
-            t-SNE coordinates.
+        np.ndarray
+            t-SNE coordinates of the lipizones.
         """
 
         lipid_df = pd.DataFrame(self.adata.X, index=self.adata.obs_names, columns=self.adata.var_names)
@@ -953,9 +895,6 @@ class Postprocessing:
         
         return tsne_coords
 
-    # -------------------------------------------------------------------------
-    # BLOCK 9: Spatial Modules by Anatomical Colocalization
-    # -------------------------------------------------------------------------
     def spatial_modules(self, selected_sections, LA="LA", LB="LB"):
         """
         Identify spatial modules using anatomical colocalization.
