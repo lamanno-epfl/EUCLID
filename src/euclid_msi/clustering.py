@@ -1479,6 +1479,63 @@ class Clustering:
             self.adata.obs[col] = np.nan
             self.adata.obs.loc[clusteringLOG.index, col] = clusteringLOG[col].values
 
+    def paint_lipizones(self, source_adata):
+        """
+        Transfer lipizone names and colors from a source AnnData object to this clustering object.
+        
+        This function maps the 'lipizone_names' and 'lipizone_color' from the source adata
+        to the current clustering object's adata based on the 'lipizone' identifier.
+        
+        Parameters
+        ----------
+        source_adata : sc.AnnData
+            Source AnnData object containing 'lipizone', 'lipizone_names', and 'lipizone_color' 
+            in the obs slot.
+            
+        Raises
+        ------
+        ValueError
+            If required columns are missing from source_adata.obs or if no mapping can be created.
+        """
+        # Validate that source_adata has the required columns
+        required_cols = ['lipizone', 'lipizone_names', 'lipizone_color']
+        missing_cols = [col for col in required_cols if col not in source_adata.obs.columns]
+        if missing_cols:
+            raise ValueError(f"Source adata is missing required columns: {missing_cols}")
+            
+        mask = source_adata.obs[required_cols].notna().all(axis=1)
+        source_adata = source_adata[mask].copy()
+        # Validate that self.adata has the lipizone column
+        if 'lipizone' not in self.adata.obs.columns:
+            raise ValueError("Current adata is missing 'lipizone' column. Run add_clustering_to_adata first.")
+            
+        # Create mapping from lipizone to lipizone_names and lipizone_color
+        source_mapping = source_adata.obs[['lipizone', 'lipizone_names', 'lipizone_color']].drop_duplicates()
+        
+        # Check for one-to-one mapping
+        if source_mapping['lipizone'].duplicated().any():
+            print("Warning: Non-unique mapping detected. Using first occurrence for each lipizone.")
+            source_mapping = source_mapping.drop_duplicates(subset=['lipizone'], keep='first')
+            
+        # Create dictionaries for mapping
+        lipizone_to_names = dict(zip(source_mapping['lipizone'], source_mapping['lipizone_names']))
+        lipizone_to_colors = dict(zip(source_mapping['lipizone'], source_mapping['lipizone_color']))
+
+        print(lipizone_to_colors)
+        
+        # Map the values to current adata
+        self.adata.obs['lipizone_names'] = self.adata.obs['lipizone'].map(lipizone_to_names)
+        self.adata.obs['lipizone_color'] = self.adata.obs['lipizone'].map(lipizone_to_colors)
+        
+        # Report mapping statistics
+        mapped_count = self.adata.obs['lipizone_names'].notna().sum()
+        total_count = len(self.adata.obs)
+        unmapped_lipizones = self.adata.obs.loc[self.adata.obs['lipizone_names'].isna(), 'lipizone'].unique()
+        
+        print(f"Successfully mapped {mapped_count}/{total_count} observations.")
+        if len(unmapped_lipizones) > 0:
+            print(f"Unmapped lipizones: {unmapped_lipizones}")
+
     # -------------------------------------------------------------------------
     # BLOCK 7: Basic plotting functions for lipizone analysis
     # -------------------------------------------------------------------------
