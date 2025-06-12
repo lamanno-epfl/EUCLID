@@ -1,6 +1,6 @@
 [project]
 name = "euclid_msi"
-version = "0.0.2"
+version = "0.0.3"
 description = "A package for spatial lipidomics data analysis including preprocessing, embedding, clustering, postprocessing, case-control analysis, and plotting."
 authors = [
   { name = "Luca Fusar Bassini", email = "luca.fusarbassini@epfl.ch" },
