@@ -1,1 +1,21 @@
-teststests/
+# Vim swap files
+*.swp
+
+# Local Python virtual environments
+.venv/
+
+# Test outputs, caches, large data files
+tests
+tests/*.csv
+tests/*.h5ad
+tests/*.html
+tests/*.mp4
+tests/**/*.png
+tests/**/*.pdf
+tests/**/*.ipynb
+tests/**/*.parquet
+tests/zenodo*/   # if you want to ignore those entire folders
+
+# Any script you don’t intend to check in
+extract_deps.py
+
