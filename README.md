@@ -26,8 +26,14 @@ Install EUCLID v0.0.4 in a fresh conda environment:
 ```bash
 conda create --name EUCLID_ENV python=3.10 -y
 conda activate EUCLID_ENV
+
 pip install --upgrade pip
+
+# if you are on a Mac, you also need to run this:
+# conda install -c conda-forge proj pyproj shapely fiona rtree geopandas -y
+
 pip install euclid-msi==0.0.4 jupyterlab ipykernel
+
 python -m ipykernel install \
   --user \
   --name EUCLID_ENV \
