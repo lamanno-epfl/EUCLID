@@ -1,6 +1,6 @@
 [project]
 name = "euclid_msi"
-version = "0.0.3"
+version = "0.0.4"
 description = "A package for spatial lipidomics data analysis including preprocessing, embedding, clustering, postprocessing, case-control analysis, and plotting."
 authors = [
   { name = "Luca Fusar Bassini", email = "luca.fusarbassini@epfl.ch" },
@@ -12,7 +12,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-dependencies = ["adjusttext (==0.8)", "arviz (==0.20.0)", "brotlipy (==0.7.0)", "harmonypy (==0.0.9)", "imblearn (==0.0)", "rdkit (==2023.9.5)", "reportlab (==4.2.5)", "xgboost (==1.7.6)", "pypdf2 (==3.0.1)", "anndata (==0.10.9)", "igraph (==0.10.5)", "jax (==0.4.35)", "joblib (==1.4.2)", "kneed (==0.8.5)", "leidenalg (==0.10.0)", "matplotlib (==3.8.3)", "mofapy2 (==0.7.2)", "networkx (==3.1)", "numba (==0.60.0)", "numpy (==1.26.4)", "numpyro (==0.16.1)", "opentsne (==1.0.1)", "optax (==0.2.3)", "pandas (==2.2.3)", "pathlib (==1.0.1)", "plotly (==5.14.1)", "scanpy (==1.10.3)", "scipy (==1.11.4)", "seaborn (==0.13.2)", "squidpy (==1.5.0)", "statsmodels (==0.14.0)", "threadpoolctl (==3.1.0)", "tqdm (==4.67.1)", "zarr (==2.14.2)"]
+dependencies = ["adjusttext (==0.8)", "arviz (==0.20.0)", "brotlipy (==0.7.0)", "harmonypy (==0.0.9)", "imblearn (==0.0)", "rdkit (==2023.9.5)", "reportlab (==4.2.5)", "xgboost (==1.7.6)", "pypdf2 (==3.0.1)", "anndata (==0.10.9)", "igraph (==0.10.5)", "jax (==0.4.35)", "joblib (==1.4.2)", "kneed (==0.8.5)", "leidenalg (==0.10.0)", "matplotlib (==3.8.3)", "mofapy2 (==0.7.2)", "networkx (==3.1)", "numba (==0.60.0)", "numpy (==1.26.4)", "numpyro (==0.16.1)", "opentsne (==1.0.1)", "optax (==0.2.3)", "pandas (==2.2.3)", "pathlib (==1.0.1)", "plotly (==5.14.1)", "scanpy (==1.10.3)", "scipy (==1.11.4)", "seaborn (==0.13.2)", "squidpy (==1.5.0)", "statsmodels (==0.14.0)", "threadpoolctl (==3.1.0)", "tqdm (==4.67.1)", "zarr (==2.14.2)", "opencv-python (==4.11.0.86)", "dask (<2025)"]
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
 [build-system]
