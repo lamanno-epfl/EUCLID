@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: euclid_msi
-Version: 0.0.1
+Version: 0.0.4
 Summary: A package for spatial lipidomics data analysis including preprocessing, embedding, clustering, postprocessing, case-control analysis, and plotting.
 Author-email: Luca Fusar Bassini <luca.fusarbassini@epfl.ch>
 License: BSD 3-Clause
@@ -9,19 +9,57 @@ Classifier: Operating System :: OS Independent
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
 License-File: LICENSE
+Requires-Dist: adjusttext==0.8
+Requires-Dist: arviz==0.20.0
+Requires-Dist: brotlipy==0.7.0
+Requires-Dist: harmonypy==0.0.9
+Requires-Dist: imblearn==0.0
+Requires-Dist: rdkit==2023.9.5
+Requires-Dist: reportlab==4.2.5
+Requires-Dist: xgboost==1.7.6
+Requires-Dist: pypdf2==3.0.1
+Requires-Dist: anndata==0.10.9
+Requires-Dist: igraph==0.10.5
+Requires-Dist: jax==0.4.35
+Requires-Dist: joblib==1.4.2
+Requires-Dist: kneed==0.8.5
+Requires-Dist: leidenalg==0.10.0
+Requires-Dist: matplotlib==3.8.3
+Requires-Dist: mofapy2==0.7.2
+Requires-Dist: networkx==3.1
+Requires-Dist: numba==0.60.0
+Requires-Dist: numpy==1.26.4
+Requires-Dist: numpyro==0.16.1
+Requires-Dist: opentsne==1.0.1
+Requires-Dist: optax==0.2.3
+Requires-Dist: pandas==2.2.3
+Requires-Dist: pathlib==1.0.1
+Requires-Dist: plotly==5.14.1
+Requires-Dist: scanpy==1.10.3
+Requires-Dist: scipy==1.11.4
+Requires-Dist: seaborn==0.13.2
+Requires-Dist: squidpy==1.5.0
+Requires-Dist: statsmodels==0.14.0
+Requires-Dist: threadpoolctl==3.1.0
+Requires-Dist: tqdm==4.67.1
+Requires-Dist: zarr==2.14.2
+Requires-Dist: opencv-python==4.11.0.86
+Requires-Dist: dask<2025
 Dynamic: license-file
 
 # EUCLID
 
-This package provides tools for data analysis with the following modules:
+Enhanced uMAIA for CLustering Lipizones, Imputation and Differential Analysis.
 
-- **Preprocessing** (exposed as `prp`)
-- **Embedding** (exposed as `em`)
-- **Clustering** (exposed as `cl`)
-- **Postprocessing** (exposed as `pop`)
-- **Case-Control Analysis** (exposed as `cc`)
-- **Plotting** (exposed as `pl`)
+This package provides tools for spatial lipidomics data analysis with the following modules:
 
-More detailed documentation will follow.
+- **Preprocessing**
+- **Embedding**
+- **Clustering**
+- **Postprocessing**
+- **Case-Control Analysis**
+- **Plotting**
 
-EUCLID was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
+EUCLID, available as a package, runs downstream of uMAIA (https://github.com/lamanno-epfl/uMAIA). A tutorial illustrating all its functions is available in this repo. EUCLID is still very much work in progress and just partially tested, so we expect corner cases to be all around. If you try EUCLID, we would love to hear from you!
+
+EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at EPFL (2023-2025), for the Lipid Brain Atlas project. The name was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
