@@ -33,6 +33,7 @@ pip install --upgrade pip
 # conda install -c conda-forge proj pyproj shapely fiona rtree geopandas -y
 
 pip install euclid-msi==0.0.4 jupyterlab ipykernel
+# for some users, this breaks - you can instead do pip install euclid-msi==0.0.4 and then conda install -c conda-forge pyzmq jupyterlab ipykernel
 
 python -m ipykernel install \
   --user \
