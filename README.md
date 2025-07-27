@@ -35,7 +35,7 @@ pip install --upgrade pip
 # first install the complex dependencies so conda handles them for you
 conda install -c conda-forge pyarrow pyzmq jupyterlab ipykernel -y
 
-pip install euclid-msi==0.0.5 --no-deps
+pip install euclid-msi==0.0.5
 # for some users, this breaks - you can instead do pip install euclid-msi==0.0.5 and then conda install -c conda-forge pyzmq jupyterlab ipykernel
 
 python -m ipykernel install \
