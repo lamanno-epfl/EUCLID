@@ -338,7 +338,7 @@ class Preprocessing:
         structures_sdf="structures.sdf",
         hmdb_csv="HMDB_complete.csv",
         user_annotation_csv=None,
-        ppm=5
+        ppm=5, exact_mass=False
     ):
         """
         Annotate m/z peaks with lipid names using external references (LIPID MAPS + HMDB, user's CSV file, ideally from a paired LC-MS dataset).
@@ -393,6 +393,9 @@ class Preprocessing:
             'INCHY_KEY': ik_list
         })
 
+        ##############
+        lipidmaps.to_parquet("lipidmaps_tmp0.parquet")
+
         # Merge with HMDB if needed to match METASPACE annotations
         hmdb = pd.read_csv(hmdb_csv, index_col=0)
         merged_df = pd.merge(
@@ -406,39 +409,76 @@ class Preprocessing:
 
         reference_mz = 800 # scale of our dataset
         distance_ab5ppm = ppm / 1e6 * reference_mz
-        
-        def _find_closest_abbreviation_and_ppm(mz_list, lipidmaps):
-            closest_abbreviations = []
-            closest_ppms = []
-            for mz in mz_list:
-                abs_diffs = np.abs(lipidmaps['EXACT_MASS'].astype(float) - float(mz))
-                if np.min(abs_diffs) <= distance_ab5ppm:
-                    closest_idx = abs_diffs.idxmin()
-                    closest_abbreviation = lipidmaps.at[closest_idx, 'ABBREVIATION']
-                    db_mz = lipidmaps.at[closest_idx, 'EXACT_MASS']
-                    ppm_val = 1e6 * abs(float(mz) - float(db_mz)) / float(db_mz)
-                else:
-                    closest_abbreviation = None
-                    ppm_val = np.nan
-                closest_abbreviations.append(closest_abbreviation)
-                closest_ppms.append(ppm_val)
-            return closest_abbreviations, closest_ppms
 
-        # add LIPIDMAPS annotation
+        def _find_closest_abbreviation_and_ppm_with_adducts(observed_mz, lipidmaps_df, ppm_tolerance):
+            """
+            Find the best match considering multiple adducts
+            """
+            # Common adduct masses to subtract from observed m/z to get neutral mass
+            adduct_offsets = {
+                'Na+': 22.989769,
+                'K+': 38.963707, 
+                'H+': 1.007825,
+                'NH4+': 18.033823
+            }
+
+            best_match = None
+            best_ppm = float('inf')
+            best_adduct = None
+
+            for adduct_name, offset in adduct_offsets.items():
+                # Calculate what the neutral mass would be
+                neutral_mass = float(observed_mz) - offset
+
+                # Find closest match in database
+                mass_diffs = np.abs(lipidmaps_df['EXACT_MASS'].astype(float) - neutral_mass)
+
+                if len(mass_diffs) > 0:
+                    min_diff_idx = mass_diffs.idxmin()
+                    db_mass = float(lipidmaps_df.at[min_diff_idx, 'EXACT_MASS'])
+
+                    # Calculate ppm error based on the database mass
+                    ppm_error = 1e6 * abs(neutral_mass - db_mass) / db_mass
+
+                    # Check if this is within tolerance and better than current best
+                    if ppm_error <= ppm_tolerance and ppm_error < best_ppm:
+                        best_ppm = ppm_error
+                        best_match = lipidmaps_df.at[min_diff_idx, 'ABBREVIATION']
+                        best_adduct = adduct_name
+
+            return best_match, best_ppm if best_match else np.nan
+
+        # Prepare lipidmaps for matching
         lipidmaps.loc[lipidmaps['ABBREVIATION'].isna(), 'ABBREVIATION'] = lipidmaps['NAME']
-        lipidmaps = lipidmaps[['EXACT_MASS', 'ABBREVIATION']]
-        # reconsider all possible adducts
-        peaks_df['mz'] = peaks_df.index.astype(float)
-        peaks_df['mz'] = [[peaks_df.iloc[i,:]['mz'] - 22.989769, peaks_df.iloc[i,:]['mz'] - 38.963707, peaks_df.iloc[i,:]['mz'] - 1.007825, peaks_df.iloc[i,:]['mz'] - 18.033823] for i in range(0, peaks_df.shape[0])]
+        lipidmaps = lipidmaps[['EXACT_MASS', 'ABBREVIATION']].dropna()
         lipidmaps['EXACT_MASS'] = pd.to_numeric(lipidmaps['EXACT_MASS'], errors='coerce')
-        # For ppm, use the original m/z (not adducts)
-        lipidmaps_ppm = lipidmaps.copy()
-        peaks_df['LIPIDMAPS'], peaks_df['ppm_LIPIDMAPS'] = _find_closest_abbreviation_and_ppm(peaks_df['PATH_MZ'].values.tolist(), lipidmaps_ppm)
+        lipidmaps = lipidmaps.dropna()
 
-        # User annotation
+        # Apply the improved matching function
+        peaks_df['mz'] = peaks_df['PATH_MZ'].astype(float)
+
+        # Get matches for all peaks
+        matches = [_find_closest_abbreviation_and_ppm_with_adducts(mz, lipidmaps, ppm) for mz in peaks_df['mz']]
+        peaks_df['LIPIDMAPS'] = [match[0] for match in matches]
+        peaks_df['ppm_LIPIDMAPS'] = [match[1] for match in matches]
+
+        ##############
+        lipidmaps.to_parquet("lipidmaps_tmp1.parquet")
+
+        # User annotation (rest of your code remains the same)
         user_ppms = [np.nan] * len(peaks_df)
         try:
             user_df = pd.read_csv(user_annotation_csv)
+            if exact_mass:
+                # generate 4 "neutral" m/z for each adduct
+                adduct_offsets = [22.989769, 38.963707, 1.007825, 18.033823]
+                expanded = []
+                for _, row in user_df.iterrows():
+                    for off in adduct_offsets:
+                        r2 = row.copy()
+                        r2['m/z'] = row['m/z'] + off
+                        expanded.append(r2)
+                user_df = pd.DataFrame(expanded).reset_index(drop=True)
             def _find_matching_lipids_and_ppm(path_mz, lipid_mz_df):
                 try:
                     lower_bound = path_mz - ppm / 1e6 * path_mz
@@ -464,6 +504,8 @@ class Preprocessing:
             user_results = [_find_matching_lipids_and_ppm(i, user_df) for i in peaks_df['PATH_MZ'].astype(float).values.tolist()]
             peaks_df['Lipid'] = [r[0] for r in user_results]
             user_ppms = [r[1][0] if r[1] else np.nan for r in user_results]
+
+            # Properly handle indexing for Score mapping
             user_df.index = user_df['m/z'].astype(str)
             peaks_df.index = peaks_df.index.astype(str) 
         except:
@@ -471,10 +513,22 @@ class Preprocessing:
         peaks_df['ppm_USER'] = user_ppms
         peaks_df['Score'] = 0
         try:
-            common_indices = peaks_df.index.intersection(user_df.index)
-            peaks_df.loc[common_indices, 'Score'] = user_df.loc[common_indices, 'Score']
+            # Map scores from user annotation based on matched peaks
+            for idx, lipid_list in enumerate(peaks_df['Lipid']):
+                if lipid_list is not None:
+                    # Find the corresponding user annotation row
+                    observed_mz = peaks_df.iloc[idx]['PATH_MZ']
+                    matching_user_rows = user_df[
+                        (abs(user_df['m/z'].astype(float) - float(observed_mz)) <= ppm / 1e6 * float(observed_mz))
+                    ]
+                    if not matching_user_rows.empty and 'Score' in user_df.columns:
+                        peaks_df.iloc[idx, peaks_df.columns.get_loc('Score')] = matching_user_rows['Score'].iloc[0]
         except:
             pass
+
+        # Fill empty Lipid entries with LIPID MAPS matches
+        mask = (peaks_df['Lipid'].isna()) & (peaks_df['LIPIDMAPS'].notna())
+        peaks_df.loc[mask, 'Lipid'] = peaks_df.loc[mask, 'LIPIDMAPS'].apply(lambda x: [x] if x is not None else None)
 
         try:
             # Plot histogram of ppm values using the user's annotation if available
@@ -521,7 +575,7 @@ class Preprocessing:
         pd.DataFrame
             Updated annotation table with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
         """
-        lcms_data = pd.read_csv(lcms_csv)
+        lcms_data = pd.read_csv(lcms_csv, index_col=0)
         lcms_data = lcms_data.set_index(lcms_data.columns[0]) 
 
         peaks_df = matched_table.copy()
@@ -535,17 +589,19 @@ class Preprocessing:
             if isinstance(annot, str):
                 annot_list = [a.strip() for a in annot.split(',')]
             else:
-                annot_list = list(annot)
+                annot_list = annot
                 
             # Get LCMS data for these lipids
             now = lcms_data.loc[lcms_data.index.intersection(annot_list)]
+            now['nmol_fraction_LCMS'] = now['nmol_fraction_LCMS'] / now['nmol_fraction_LCMS'].sum()
             if not now.empty:
+                print(now['nmol_fraction_LCMS'])
                 # Check if any lipid exceeds threshold
                 if now['nmol_fraction_LCMS'].max() > threshold:
                     prioritized = now.index[now['nmol_fraction_LCMS'] > threshold][0]
                     peaks_df.at[peaks_df.index[i], 'AnnotationLCMSPrioritized'] = prioritized
         return peaks_df
-
+    
     def prioritize_adducts_by_signal(
         self,
         path_data,
