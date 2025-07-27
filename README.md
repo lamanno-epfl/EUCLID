@@ -21,7 +21,7 @@ EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at 
 
 ## Installation
 
-Install EUCLID v0.0.5 in a fresh conda environment:
+Install EUCLID v0.0.5 in a fresh conda environment (~ 10 minutes):
 
 ```bash
 conda create --name EUCLID_ENV python=3.10 -y
