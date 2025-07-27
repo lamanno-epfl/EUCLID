@@ -21,7 +21,7 @@ EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at 
 
 ## Installation
 
-Install EUCLID v0.0.4 in a fresh conda environment:
+Install EUCLID v0.0.5 in a fresh conda environment:
 
 ```bash
 conda create --name EUCLID_ENV python=3.10 -y
@@ -32,8 +32,8 @@ pip install --upgrade pip
 # if you are on a Mac, you also need to run this:
 # conda install -c conda-forge proj pyproj shapely fiona rtree geopandas -y
 
-pip install euclid-msi==0.0.4 jupyterlab ipykernel
-# for some users, this breaks - you can instead do pip install euclid-msi==0.0.4 and then conda install -c conda-forge pyzmq jupyterlab ipykernel
+pip install euclid-msi==0.0.5 jupyterlab ipykernel
+# for some users, this breaks - you can instead do pip install euclid-msi==0.0.5 and then conda install -c conda-forge pyzmq jupyterlab ipykernel
 
 python -m ipykernel install \
   --user \
