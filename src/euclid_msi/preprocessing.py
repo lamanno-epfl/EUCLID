@@ -63,7 +63,7 @@ class Preprocessing:
         
         root = zarr.open(path_data, mode='r')
         features = np.sort(list(root.group_keys()))[:n_molecules]
-        masks = [np.load(f'/data/LBA_DATA/{section}/mask.npy') for section in acquisitions]
+        masks = [np.load(f'{section}/mask.npy') for section in acquisitions]
         
         n_acquisitions = len(acquisitions)
         accqn_num = np.arange(n_acquisitions)
