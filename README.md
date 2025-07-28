@@ -43,4 +43,4 @@ python -m ipykernel install \
   --name EUCLID_ENV \
   --display-name "Python (EUCLID_ENV)"
 ```
-
+To try EUCLID, download from this repo the notebook euclid_pregnancy_tutorial.ipynb - it will autonomously download from Zenodo the uMAIA-normalized data and masks and the metadata needed for the tutorial.
