@@ -4,6 +4,7 @@ pyproject.toml
 src/euclid_msi/__init__.py
 src/euclid_msi/backSPIN.py
 src/euclid_msi/clustering.py
+src/euclid_msi/data_management.py
 src/euclid_msi/embedding.py
 src/euclid_msi/euclid_casecontrol.py
 src/euclid_msi/plotting.py
@@ -14,3 +15,4 @@ src/euclid_msi.egg-info/SOURCES.txt
 src/euclid_msi.egg-info/dependency_links.txt
 src/euclid_msi.egg-info/requires.txt
 src/euclid_msi.egg-info/top_level.txt
+tests/test_data_management.py
