@@ -11,11 +11,9 @@ This package provides tools for spatial lipidomics data analysis with the follow
 - **Case-Control Analysis**
 - **Plotting**
 
-EUCLID, available as a package, runs downstream of uMAIA (https://github.com/lamanno-epfl/uMAIA). A tutorial illustrating all its functions is available in this repo. EUCLID is still very much work in progress and just partially tested, so we expect corner cases to be all around. If you try EUCLID, we would love to hear from you!
+EUCLID, available as a package, runs downstream of uMAIA (https://github.com/lamanno-epfl/uMAIA). A tutorial illustrating all its functions is available in this repo. EUCLID is still very much work in progress and just partially tested, so we expect corner cases to be all around. We tested EUCLID on Linux and partially Mac, but not Windows. If you try EUCLID, we would love to hear from you!
 
 Contact: luca.fusarbassini@epfl.ch, gioele.lamanno@epfl.ch
-
-The files to run the tutorial are available on Zenodo: https://zenodo.org/records/15689279 (they are also downloaded automatically from the tutorial notebook)
 
 EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at EPFL (2023-2025), for the Lipid Brain Atlas project. The name was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
 
@@ -43,4 +41,4 @@ python -m ipykernel install \
   --name EUCLID_ENV \
   --display-name "Python (EUCLID_ENV)"
 ```
-
+To try EUCLID, download from this repo the notebook euclid_pregnancy_tutorial.ipynb - it will autonomously download from Zenodo the uMAIA-normalized data and masks and the metadata needed for the tutorial.
