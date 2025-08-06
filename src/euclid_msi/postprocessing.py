@@ -510,7 +510,7 @@ class Postprocessing:
     
         # 6) Keep only lipids whose validation Pearson > `valid_pearson_threshold`
         metrics_df.to_csv(metrics_csv)
-        valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index.astype(float).astype(str)
+        valid_features = metrics_df.loc[metrics_df["val_pearson_r"] > valid_pearson_threshold].index#.astype(float).astype(str)
         coords_pred = coords_pred.loc[:, list(coords_pred.columns[:len(self.coordinates.columns)]) + list(valid_features)]
 
         # Store the restored features in obsm and their names in uns

@@ -576,8 +576,7 @@ class Preprocessing:
             Updated annotation table with prioritized annotations in a new column 'AnnotationLCMSPrioritized'.
         """
         lcms_data = pd.read_csv(lcms_csv, index_col=0)
-        lcms_data = lcms_data.set_index(lcms_data.columns[0]) 
-
+    
         peaks_df = matched_table.copy()
         peaks_df['AnnotationLCMSPrioritized'] = peaks_df[annotation_col]
 
@@ -593,6 +592,7 @@ class Preprocessing:
                 
             # Get LCMS data for these lipids
             now = lcms_data.loc[lcms_data.index.intersection(annot_list)]
+            
             now['nmol_fraction_LCMS'] = now['nmol_fraction_LCMS'] / now['nmol_fraction_LCMS'].sum()
             if not now.empty:
                 print(now['nmol_fraction_LCMS'])

@@ -228,7 +228,10 @@ class Plotting:
             If True, display plot inline.
         """
         
-        coords = self.adata.obs[["zccf", "yccf", "xccf", "SectionID", "division", "boundary", list(lipizone_filter.keys())[0]]].copy()
+        cols_to_select = ["zccf", "yccf", "xccf", "SectionID", "division", "boundary"]
+        if lipizone_filter:
+            cols_to_select.append(list(lipizone_filter.keys())[0])
+        coords = self.adata.obs[cols_to_select].copy()
         lipid_idx = list(self.adata.var_names).index(lipid)
 
         lipid_values = self.adata.X[:, lipid_idx].flatten() 
