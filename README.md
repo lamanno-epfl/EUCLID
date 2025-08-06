@@ -31,10 +31,10 @@ pip install --upgrade pip
 # conda install -c conda-forge proj pyproj shapely fiona rtree geopandas -y
 
 # first install the complex dependencies so conda handles them for you
-conda install -c conda-forge cxx-compiler pyarrow pyzmq jupyterlab ipykernel -y
+conda install mamba -c conda-forge -y
+mamba install -c conda-forge cxx-compiler pyarrow pyzmq jupyterlab ipykernel -y
 
 pip install euclid-msi==0.0.6 tables
-# for some users, this breaks - you can instead do pip install euclid-msi==0.0.6 and then conda install -c conda-forge pyzmq jupyterlab ipykernel
 
 python -m ipykernel install \
   --user \
