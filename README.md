@@ -15,7 +15,7 @@ EUCLID, available as a package, runs downstream of uMAIA (https://github.com/lam
 
 Contact: luca.fusarbassini@epfl.ch, gioele.lamanno@epfl.ch
 
-EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at EPFL (2023-2025), for the Lipid Brain Atlas project. The name was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
+EUCLID was developed by Luca Fusar Bassini in the La Manno and D'Angelo Labs at EPFL (2023-2025), for the Lipid Brain Atlas project, as described in our manuscript: https://www.biorxiv.org/cgi/content/short/2025.10.13.682018v1. The name was inspired from the beautiful Sleep Token song: https://www.youtube.com/watch?v=DDdByJYUVeA
 
 ## Installation
 
